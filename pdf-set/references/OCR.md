@@ -1,6 +1,6 @@
 CRITICAL: 
 - 一旦命令开始执行，进度条显示[RUNNING]，你就不应重复执行任务或者擅自中断任务──直至命令执行完毕，显示[OVER]再做出反应。
-- 如果你是Antigravity, 你应该在命令运行之后就停止输出该次对话，留命令在后台执行，用**中文**告诉用户可以找到上方的Background Steps去查看进度。不需要你来monitor. 把对话控制权交还给用户，等待用户下一步指令。其他AI Agent忽略该指令。
+- 如果你是Antigravity, 你应该在命令运行之后就停止输出该次对话，留命令在后台执行，用**中文**告诉用户:应该在上方的Background Steps去查看进度，下方出现ERROR不影响生成进度。不需要你来monitor. 把对话控制权交还给用户，等待用户下一步指令。其他没有后台python脚本能力的AI Agent忽略该指令。
 - 若用户未指定开始和中止页码，不需要你来执行任何powershell命令来判断页数，你不应该擅自指定 --start; --end;和--batch 参数，你调用的脚本会自动判断页数。
 - 若用户指定了开始和中止页码──你在列plan时不要把任务分很多条命令的小任务，如果你读取到的start参数是0, end参数是451, 那么你就列一条命令，像是`python .agent/skills/pdf-set/scripts/ocr.py --base-dir "C:\path\to" --book-name "某书" --start 0 --end 451`就可以了。不可以用`--start 0 --end 50`、`--start 51 --end 100`……`--start 400 --end 451`这样的多份小任务分批处理。
 
@@ -57,4 +57,4 @@ python .agent/skills/pdf-set/scripts/ocr.py --input-file "C:\path\to\images\20.j
 
 ## 阶段 3：不做任何其他检查地，运行你设置好必要参数后的脚本。
 
-## 阶段4: 把脚本留在后台运行，等待用户进一步指令。
+## 阶段4: 结束此次对话，把脚本留在后台运行，等待用户进一步指令。建议用户执行查漏补缺。

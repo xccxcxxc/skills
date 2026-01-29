@@ -180,6 +180,8 @@ def find_max_index(output_dir):
     for name in os.listdir(output_dir):
         if name.endswith(".md"):
             stem = os.path.splitext(name)[0]
+            if stem.endswith(".fail"):
+                stem = stem[:-5]
             if stem.isdigit():
                 nums.add(int(stem))
     idx = 0

@@ -1,9 +1,8 @@
 ---
 name: pdf-set
-description: OCR-to-markdown pipeline for book/PDF image workflows: split PDF to images, OCR images, rough merge, split by一级标题/目录, format/layout cleanup, merge formatted chapters, translate with paragraph/quote rules, and merge translations. Use when handling PDF分图、OCR图片、合并结果、排版结果、翻译结果 or book reconstruction tasks.
+description: A toolbox for OCR PDF
 ---
-
-# PDF OCR Workflow
+# pdf-set
 
 Use the correct subtask file based on the user's request. Each subtask is a standalone procedure; do not mix steps across tasks unless asked.
 

@@ -27,4 +27,3 @@ Use the correct subtask file based on the user's request. Each subtask is a stan
 
 ## Notes
 - Do not add extra guidance beyond the selected subtask.
-- Preserve special markers (e.g., `🀄，页码`) when the subtask requires it.

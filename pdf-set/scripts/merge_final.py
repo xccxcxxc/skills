@@ -1,6 +1,17 @@
 import argparse
 import os
 import re
+import unicodedata
+
+TOKEN_MAP = {
+    "and": "和",
+    "or": "或",
+    "he": "他",
+    "of": "的",
+}
+
+SPACE_CHARS = {" ", "\t", "\u3000"}
+TOKEN_RE = re.compile(r"\b(and|or|he|of)\b", re.IGNORECASE)
 
 DEFAULT_INPUT_DIRNAME = "typeset-result"
 
@@ -11,6 +22,64 @@ def read_single_path(path):
             if value:
                 return value
     return ""
+
+def is_space(ch: str) -> bool:
+    return ch in SPACE_CHARS
+
+
+def is_fullwidth(ch: str) -> bool:
+    return unicodedata.east_asian_width(ch) in {"W", "F"}
+
+
+def find_left_nonspace(text: str, idx: int) -> int:
+    j = idx - 1
+    while j >= 0 and is_space(text[j]):
+        j -= 1
+    return j
+
+
+def find_right_nonspace(text: str, idx: int) -> int:
+    j = idx
+    n = len(text)
+    while j < n and is_space(text[j]):
+        j += 1
+    return j
+
+
+def replace_inline_tokens(text: str):
+    out = []
+    i = 0
+    count = 0
+
+    for m in TOKEN_RE.finditer(text):
+        if m.start() < i:
+            continue
+
+        left_ns = find_left_nonspace(text, m.start())
+        right_ns = find_right_nonspace(text, m.end())
+
+        if left_ns < 0 or right_ns >= len(text):
+            continue
+
+        if not (is_fullwidth(text[left_ns]) and is_fullwidth(text[right_ns])):
+            continue
+
+        seg = text[i:m.start()]
+        seg = seg.rstrip(" \t\u3000")
+        out.append(seg)
+
+        token = m.group(1).lower()
+        out.append(TOKEN_MAP[token])
+        count += 1
+
+        j = m.end()
+        while j < len(text) and is_space(text[j]):
+            j += 1
+        i = j
+
+    out.append(text[i:])
+    return "".join(out), count
+
 
 def merge_md_files(input_dir, output_file):
     files = [f for f in os.listdir(input_dir) if f.endswith('.md')]
@@ -30,11 +99,15 @@ def merge_md_files(input_dir, output_file):
             content = f.read().strip()
             merged_content.append(content)
 
+    merged_text = "\n\n".join(merged_content) + "\n"
+    merged_text, replaced = replace_inline_tokens(merged_text)
+
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     with open(output_file, 'w', encoding='utf-8') as f:
-        f.write('\n\n'.join(merged_content) + "\n")
+        f.write(merged_text)
 
     print(f"Successfully merged into: {output_file}")
+    print(f"Inline token replacements: {replaced}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

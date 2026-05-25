@@ -2,13 +2,17 @@ import os
 import sys
 import time
 import re
+import base64
 from datetime import datetime
 import glob
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from google import genai
-from google.genai import types
+from openai import OpenAI
  
+SCRIPT_DIR = os.path.dirname(__file__)
+ASSETS_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "assets"))
+
+
 def _load_secrets_text(path):
     if not os.path.isfile(path):
         return ""
@@ -27,20 +31,18 @@ def _extract_secret(patterns, text):
 def _load_secrets_or_exit(path):
     content = _load_secrets_text(path)
     if not content.strip():
-        print("请在Antigravity Tools中复制配置粘贴到secrets.txt中！")
+        print("请在Antigravity Tools中复制配置粘贴到secrets_openai.txt中！")
         sys.exit(1)
     return content
 
 
-secrets_path = os.path.join(os.path.dirname(__file__), "secrets.txt")
+secrets_path = os.path.join(ASSETS_DIR, "secrets_openai.txt")
 secrets_text = _load_secrets_or_exit(secrets_path)
 
 BASE_URL = _extract_secret(
     [
-        r"api_endpoint\s*[:=]\s*['\"]([^'\"]+)['\"]",
-        r"['\"]api_endpoint['\"]\s*[:=]\s*['\"]([^'\"]+)['\"]",
-        r"client_options\s*=\s*{[^}]*api_endpoint\s*:\s*['\"]([^'\"]+)['\"][^}]*}",
-        r"client_options\s*=\s*{[^}]*['\"]api_endpoint['\"]\s*:\s*['\"]([^'\"]+)['\"][^}]*}",
+        r"base_url\s*[:=]\s*['\"]([^'\"]+)['\"]",
+        r"['\"]base_url['\"]\s*[:=]\s*['\"]([^'\"]+)['\"]",
     ],
     secrets_text,
 )
@@ -51,26 +53,23 @@ API_KEY = _extract_secret(
     ],
     secrets_text,
 )
-MODEL = _extract_secret([r"GenerativeModel\s*\(\s*['\"]([^'\"]+)['\"]\s*\)"], secrets_text)
+MODEL = _extract_secret(
+    [
+        r"model\s*[:=]\s*['\"]([^'\"]+)['\"]",
+        r"['\"]model['\"]\s*[:=]\s*['\"]([^'\"]+)['\"]",
+    ],
+    secrets_text,
+)
+FALLBACK_MODEL = "claude-sonnet-4-6"
 
 if not BASE_URL or not API_KEY or not MODEL:
-    print("secrets.txt missing required values: api_endpoint, api_key, or model.")
+    print("secrets_openai.txt missing required values: base_url, api_key, or model.")
     sys.exit(1)
 
-if BASE_URL.endswith("/v1"):
-    BASE_URL = BASE_URL[:-3]
-
-client = genai.Client(
+client = OpenAI(
+    base_url=BASE_URL,
     api_key=API_KEY,
-    http_options={"base_url": BASE_URL},
 )
-
-SAFETY_SETTINGS = {
-    "HARM_CATEGORY_HARASSMENT": "OFF",
-    "HARM_CATEGORY_HATE_SPEECH": "OFF",
-    "HARM_CATEGORY_SEXUALLY_EXPLICIT": "OFF",
-    "HARM_CATEGORY_DANGEROUS_CONTENT": "OFF",
-}
  
 def countdown_timer(seconds):
     """
@@ -123,17 +122,18 @@ def _guess_mime_type(image_path):
 
 
 def _extract_text_from_response(response):
-    if getattr(response, "text", None):
-        return response.text
     try:
-        parts = response.candidates[0].content.parts
+        message = response.choices[0].message
     except Exception:
         return ""
-    if not parts:
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content.strip()
+    if not content:
         return ""
     texts = []
-    for part in parts:
-        text = getattr(part, "text", None)
+    for part in content:
+        text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
         if text:
             texts.append(text)
     return "\n".join(texts).strip()
@@ -141,21 +141,21 @@ def _extract_text_from_response(response):
 
 def _get_finish_reason(response):
     try:
-        cand = response.candidates[0]
+        choice = response.choices[0]
     except Exception:
         return ""
     for attr in ("finish_reason", "finishReason"):
-        val = getattr(cand, attr, None)
+        val = getattr(choice, attr, None)
         if val:
             return str(val)
-    if isinstance(cand, dict):
-        return cand.get("finishReason") or cand.get("finish_reason") or ""
+    if isinstance(choice, dict):
+        return choice.get("finishReason") or choice.get("finish_reason") or ""
     for method in ("model_dump", "to_dict"):
         if hasattr(response, method):
             try:
                 data = getattr(response, method)()
-                cand0 = (data.get("candidates") or [None])[0] or {}
-                return cand0.get("finishReason") or cand0.get("finish_reason") or ""
+                choice0 = (data.get("choices") or [None])[0] or {}
+                return choice0.get("finishReason") or choice0.get("finish_reason") or ""
             except Exception:
                 pass
     return ""
@@ -216,32 +216,42 @@ def _load_prompt(prompt_path):
     return "Extract and transcribe any visible text from this image, exactly as it appears."
 
 
-def extract_text_from_gemini_api(image_path, page_num, prompt_text):
+def extract_text_from_openai_api(image_path, page_num, prompt_text, model_name=None):
     """
-    Sends the image to a GenAI-compatible API and retrieves the extracted text.
+    Sends the image to an OpenAI-compatible API and retrieves the extracted text.
     Added detailed logging and error information.
     """
     prohibited_sentinel = "__PROHIBITED_CONTENT__"
+    selected_model = model_name or MODEL
     last_error_message = None
     for attempt in range(1, 6):
         try:
             image_bytes = _read_image_bytes(image_path)
-            content = types.Content(
-                role="user",
-                parts=[
-                    types.Part.from_text(text=prompt_text),
-                    types.Part.from_bytes(data=image_bytes, mime_type=_guess_mime_type(image_path)),
-                ],
-            )
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=[content],
+            image_filename = os.path.basename(image_path)
+            mime_type = _guess_mime_type(image_path)
+            image_b64 = base64.b64encode(image_bytes).decode("ascii")
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {"type": "text", "text": f"文件名：{image_filename}"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
+                        },
+                    ],
+                }
+            ]
+            response = client.chat.completions.create(
+                model=selected_model,
+                messages=messages,
             )
 
             finish_reason = _get_finish_reason(response)
-            if finish_reason and "PROHIBITED_CONTENT" in finish_reason.upper():
+            if finish_reason and "CONTENT_FILTER" in finish_reason.upper():
                 return prohibited_sentinel
-            if finish_reason and "RECITATION" in finish_reason.upper():
+            if finish_reason and "PROHIBITED_CONTENT" in finish_reason.upper():
                 return prohibited_sentinel
 
             content_text = _extract_text_from_response(response)
@@ -270,6 +280,13 @@ def extract_text_from_gemini_api(image_path, page_num, prompt_text):
             time.sleep(delay)
 
     return None
+
+
+def extract_text_with_fallback_model(image_path, page_num, prompt_text):
+    text = extract_text_from_openai_api(image_path, page_num, prompt_text, model_name=MODEL)
+    if text == "__PROHIBITED_CONTENT__":
+        text = extract_text_from_openai_api(image_path, page_num, prompt_text, model_name=FALLBACK_MODEL)
+    return text
  
 def process_images(images_dir, output_dir, prompt_text, start_idx=None, end_idx=None, batch_size=3):
     """
@@ -315,7 +332,7 @@ def process_images(images_dir, output_dir, prompt_text, start_idx=None, end_idx=
 
     def _process_one(image_path, idx):
         nonlocal fail_count
-        text = extract_text_from_gemini_api(image_path, idx, prompt_text)
+        text = extract_text_with_fallback_model(image_path, idx, prompt_text)
         base_name = os.path.splitext(os.path.basename(image_path))[0]
         if text == "__PROHIBITED_CONTENT__":
             out_path = os.path.join(output_dir, f"{base_name}.fail.md")
@@ -377,7 +394,7 @@ def process_single_image(image_path, output_dir, output_file, prompt_text):
         base_name = os.path.splitext(os.path.basename(image_path))[0]
         out_path = os.path.join(output_dir, f"{base_name}.md")
 
-    text = extract_text_from_gemini_api(image_path, 1, prompt_text)
+    text = extract_text_with_fallback_model(image_path, 1, prompt_text)
     if text == "__PROHIBITED_CONTENT__":
         fail_path = os.path.join(output_dir, f"{os.path.splitext(os.path.basename(image_path))[0]}.fail.md")
         try:
@@ -484,7 +501,7 @@ def main():
     parser.add_argument(
         "--prompt-file",
         default=None,
-        help="Path to prompt file (default: <script-dir>/ocr_prompt.md).",
+        help="Path to prompt file (default: <skill-dir>/assets/ocr_prompt.md).",
     )
     parser.add_argument(
         "--prompt-file-from",
@@ -523,7 +540,7 @@ def main():
         if output_file_from:
             output_file = output_file_from
 
-    prompt_path = args.prompt_file or os.path.join(os.path.dirname(__file__), "ocr_prompt.md")
+    prompt_path = args.prompt_file or os.path.join(ASSETS_DIR, "ocr_prompt.md")
     if args.prompt_file_from:
         prompt_file_from = read_single_path(args.prompt_file_from)
         if prompt_file_from:

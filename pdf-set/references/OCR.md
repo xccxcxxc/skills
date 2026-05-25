@@ -1,4 +1,5 @@
 CRITICAL: 
+- 先提供命令（windows环境下的绝对路径）给用户让用户自己运行，用户要求你来执行命令时，你再执行命令。
 - 一旦命令开始执行，进度条显示[RUNNING]，你就不应重复执行任务或者擅自中断任务──直至命令执行完毕，显示[OVER]再做出反应。
 - 如果你是Antigravity, 你应该在命令运行之后就停止输出该次对话，留命令在后台执行，用**中文**告诉用户应该在上方的Background Steps去查看进度，下方出现ERROR不影响生成进度。不需要你来monitor. 把对话控制权交还给用户，等待用户下一步指令。其他AI Agent忽略该指令。
 - 若用户未指定开始和中止页码，不需要你来执行任何powershell命令来判断页数，你不应该擅自指定 --start; --end;和--batch 参数，你调用的脚本会自动判断页数。
@@ -13,10 +14,12 @@ CRITICAL:
 ## 脚本参考
 
 - 使用 `scripts/ocr.py` 完成 OCR。
+- OCR 统一使用 OpenAI Python 库及 `assets/secrets_openai.txt` 配置。
 - 默认按当前工作目录推导路径：
   - 输入：`<当前目录>/images/`
   - 输出：`<当前目录>/ocr-result/`
-  - Prompt：`<脚本目录>/ocr_prompt.md`
+  - Prompt：`<skill-dir>/assets/ocr_prompt.md`
+  - 密钥配置：`<skill-dir>/assets/secrets_openai.txt`，需包含 `base_url`、`api_key`、`model`
 - 可选参数：
   - `--base-dir` 指定书籍目录
   - `--book-name` 指定书籍名（自动定位到 `<base-dir>/<书籍名>`）

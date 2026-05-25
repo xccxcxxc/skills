@@ -1,0 +1,275 @@
+# -*- coding: utf-8 -*-
+import argparse
+import os
+import re
+import tempfile
+import unicodedata
+
+
+DEFAULT_MERGE_DIRNAME = "merge-result"
+DEFAULT_TYPESET_DIRNAME = "typeset-result"
+DEFAULT_INPUT_FILENAME = "0.rough.md"
+
+TOKEN_MAP = {
+    "and": "和",
+    "or": "或",
+    "he": "他",
+    "of": "的",
+}
+TOKEN_RE = re.compile(r"\b(and|or|he|of)\b", re.IGNORECASE)
+SPACE_CHARS = {" ", "\t", "\u3000"}
+
+
+def natural_number(filename):
+    match = re.match(r"^(\d+)\.", filename)
+    return int(match.group(1)) if match else 10**9
+
+
+def numbered_md_files(directory):
+    if not os.path.isdir(directory):
+        return []
+    return sorted(
+        [
+            name
+            for name in os.listdir(directory)
+            if re.match(r"^[1-9]\d*\..*\.md$", name)
+        ],
+        key=natural_number,
+    )
+
+
+def remove_numbered_md(directory):
+    for name in numbered_md_files(directory):
+        os.remove(os.path.join(directory, name))
+
+
+def safe_filename(title):
+    title = re.sub(r'[\\/*?:"<>|]', "_", title).strip()
+    return title or "untitled"
+
+
+def split_by_h1(input_file, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    remove_numbered_md(output_dir)
+
+    with open(input_file, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    parts = re.split(r"^#\s+", content, flags=re.MULTILINE)
+    if len(parts) <= 1:
+        raise RuntimeError(f"No H1 headings found in {input_file}")
+
+    created = []
+    for index, section in enumerate(parts[1:], start=1):
+        lines = section.split("\n", 1)
+        title = lines[0].strip()
+        body = lines[1] if len(lines) > 1 else ""
+        filename = f"{index}.{safe_filename(title)}.md"
+        path = os.path.join(output_dir, filename)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"# {title}\n{body}".rstrip() + "\n")
+        created.append(filename)
+    return created
+
+
+def cleanup_text(text):
+    text = re.sub(r"([\u4e00-\u9fa5]{2,})\1+", r"\1", text)
+    text = re.sub(r"([\u4e00-\u9fa5])\1{2,}", r"\1\1", text)
+    text = re.sub(r"(\b\w+\b)\1+", r"\1", text)
+
+    def clean_footnote(match):
+        return "".join(line.strip() for line in match.group(0).splitlines())
+
+    return re.compile(r"<sup>.*?</sup>", re.DOTALL).sub(clean_footnote, text)
+
+
+def is_halfwidth_char(ch):
+    if not ch or ch.isspace():
+        return False
+    return unicodedata.east_asian_width(ch) not in ("F", "W")
+
+
+def process_layout(input_path, output_path, is_index=False):
+    with open(input_path, "r", encoding="utf-8") as f:
+        lines = f.read().splitlines()
+
+    blocks = []
+    current_block = ""
+    prev_block_is_heading = False
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        starts_with_two_spaces = line.startswith("  ")
+        is_heading = line.startswith("#")
+        is_marker = "🀄" in line
+        is_footnote_start = line.startswith("<sup>")
+        is_bracket_title = line.startswith("【") or line.startswith("（")
+        is_date_line = re.match(r"^\d{4}(\.\.\.)?\s+", stripped)
+
+        is_new_block = (
+            is_heading
+            or starts_with_two_spaces
+            or is_marker
+            or is_footnote_start
+            or is_bracket_title
+            or is_date_line
+        )
+
+        if current_block and current_block.lstrip().startswith("#"):
+            is_new_block = True
+
+        if not is_new_block:
+            if is_index:
+                is_new_block = True
+            elif len(stripped) < 50 and not any(c in stripped for c in "。！？.!?！？．。"):
+                is_new_block = True
+
+        if is_new_block:
+            if current_block:
+                blocks.append(current_block.rstrip())
+                prev_block_is_heading = current_block.lstrip().startswith("#")
+            if prev_block_is_heading and not (
+                is_heading or is_marker or is_footnote_start or is_bracket_title or is_date_line
+            ) and not starts_with_two_spaces:
+                line = "  " + stripped
+            current_block = line
+        elif current_block:
+            prev = current_block.rstrip()
+            if prev.endswith("-"):
+                current_block = prev[:-1] + stripped
+            elif prev and stripped and is_halfwidth_char(prev[-1]) and is_halfwidth_char(stripped[0]):
+                current_block = prev + " " + stripped
+            else:
+                current_block = prev + stripped
+        else:
+            current_block = line
+
+    if current_block:
+        blocks.append(current_block.rstrip())
+
+    final_text = cleanup_text("\n\n".join(blocks))
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(final_text.rstrip() + "\n")
+
+
+def typeset_files(input_dir, output_dir, filenames):
+    os.makedirs(output_dir, exist_ok=True)
+    remove_numbered_md(output_dir)
+    for filename in filenames:
+        process_layout(
+            os.path.join(input_dir, filename),
+            os.path.join(output_dir, filename),
+            is_index=("目录" in filename or "目錄" in filename),
+        )
+
+
+def is_space(ch):
+    return ch in SPACE_CHARS
+
+
+def is_fullwidth(ch):
+    return unicodedata.east_asian_width(ch) in {"W", "F"}
+
+
+def find_left_nonspace(text, idx):
+    j = idx - 1
+    while j >= 0 and is_space(text[j]):
+        j -= 1
+    return j
+
+
+def find_right_nonspace(text, idx):
+    j = idx
+    while j < len(text) and is_space(text[j]):
+        j += 1
+    return j
+
+
+def replace_inline_tokens(text):
+    out = []
+    start = 0
+    count = 0
+
+    for match in TOKEN_RE.finditer(text):
+        if match.start() < start:
+            continue
+        left = find_left_nonspace(text, match.start())
+        right = find_right_nonspace(text, match.end())
+        if left < 0 or right >= len(text):
+            continue
+        if not (is_fullwidth(text[left]) and is_fullwidth(text[right])):
+            continue
+
+        out.append(text[start:match.start()].rstrip(" \t\u3000"))
+        out.append(TOKEN_MAP[match.group(1).lower()])
+        count += 1
+
+        start = match.end()
+        while start < len(text) and is_space(text[start]):
+            start += 1
+
+    out.append(text[start:])
+    return "".join(out), count
+
+
+def merge_final(input_dir, filenames, output_file):
+    merged = []
+    for filename in sorted(filenames, key=natural_number):
+        with open(os.path.join(input_dir, filename), "r", encoding="utf-8") as f:
+            merged.append(f.read().strip())
+    text = "\n\n".join(merged).rstrip() + "\n"
+    text, replaced = replace_inline_tokens(text)
+
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    with open(output_file, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Successfully merged into: {output_file}")
+    print(f"Inline token replacements: {replaced}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Typeset 0.rough.md into a final book Markdown file."
+    )
+    parser.add_argument("--base-dir", default=os.getcwd(), help="Book root directory.")
+    parser.add_argument("--input-file", default=None, help="Input rough Markdown file.")
+    parser.add_argument("--merge-dir", default=None, help="Intermediate split directory when --keep-intermediate is set.")
+    parser.add_argument("--typeset-dir", default=None, help="Intermediate typeset directory when --keep-intermediate is set.")
+    parser.add_argument("--book-name", default=None, help="Output book name.")
+    parser.add_argument("--output-file", default=None, help="Final output Markdown file.")
+    parser.add_argument(
+        "--keep-intermediate",
+        action="store_true",
+        help="Keep numbered split files in merge-result and typeset-result for debugging.",
+    )
+    args = parser.parse_args()
+
+    base_dir = args.base_dir
+    default_merge_dir = os.path.join(base_dir, DEFAULT_MERGE_DIRNAME)
+    input_file = args.input_file or os.path.join(default_merge_dir, DEFAULT_INPUT_FILENAME)
+    book_name = args.book_name or os.path.basename(os.path.normpath(base_dir))
+    output_file = args.output_file or os.path.join(base_dir, f"{book_name}.md")
+
+    if args.keep_intermediate:
+        split_dir = args.merge_dir or default_merge_dir
+        typeset_dir = args.typeset_dir or os.path.join(base_dir, DEFAULT_TYPESET_DIRNAME)
+        split_files = split_by_h1(input_file, split_dir)
+        print(f"Sections detected: {len(split_files)}")
+        typeset_files(split_dir, typeset_dir, split_files)
+        merge_final(typeset_dir, split_files, output_file)
+    else:
+        with tempfile.TemporaryDirectory(prefix="pdf-set-split-") as split_dir:
+            with tempfile.TemporaryDirectory(prefix="pdf-set-typeset-") as typeset_dir:
+                split_files = split_by_h1(input_file, split_dir)
+                print(f"Sections detected: {len(split_files)}")
+                typeset_files(split_dir, typeset_dir, split_files)
+                merge_final(typeset_dir, split_files, output_file)
+
+    print(f"Done. Files processed: {len(split_files)}.")
+
+
+if __name__ == "__main__":
+    main()

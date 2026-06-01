@@ -31,7 +31,7 @@ def _extract_secret(patterns, text):
 def _load_secrets_or_exit(path):
     content = _load_secrets_text(path)
     if not content.strip():
-        print("请在Antigravity Tools中复制配置粘贴到secrets_openai.txt中！")
+        print("请在 assets/secrets_openai.txt 中填写你自己的 OpenAI 兼容 API 配置：base_url、api_key、model。")
         sys.exit(1)
     return content
 

@@ -1,216 +1,320 @@
 <img width="1791" height="690" alt="github-header-banner" src="https://github.com/user-attachments/assets/cbfb5301-9609-4939-929d-e36a98bbb119" />
 
-此skill的实施旨在使用Google AI工具 Antigravity 对PDF扫描本的书籍进行逐页OCR并借由AI能力校正排版，以生成可编辑的Markdown文本文件，方便后续转换处理和做引用摘抄使用。
+# pdf-set
 
-## 使用情境示例：
+`pdf-set` 是一个给 AI Agent 使用的 PDF 书籍处理 skill，主要用于把扫描版 PDF 逐页转成图片、OCR 为 Markdown、整理标题层级、排版成书，并可继续进行翻译和 EPUB 导出。
 
-- 将PDF书籍转换为ePub格式，供小屏电子阅读器中阅读。
-- 为扫描质量低的PDF书籍增加可读性。
-- 将竖排版书籍重录入为横向排版，供阅读障碍读者方便阅读。
-- 用AI翻译，制作双语版书籍。
-- ……
+这个项目现在不依赖特定的 AI 客户端或额外管理工具。推荐使用 **Codex**，也可以使用任何能读取本地文件、运行命令、理解 Markdown 指令的 Agent，例如 Claude Code、Cursor Agent、Gemini CLI、Qwen Code 等。
 
-## 使用有门槛吗？
+## 适合做什么
 
-有一些些，但不多。
+- 将扫描版 PDF 书籍 OCR 成可编辑的 Markdown。
+- 为低清晰度、不可复制文字的 PDF 提取正文。
+- 将竖排、繁体、旧式排版书籍整理成更适合现代阅读的文本。
+- 对 OCR 后的 Markdown 做标题整理、断行处理、注释修复和成书排版。
+- 将整理后的文本翻译成中文、外文或双语对照版本。
+- 将最终 Markdown 导出为 EPUB，方便在电纸书或移动设备上阅读。
 
-- 经济成本：使用Google提供的每5h刷新一次的免费AI额度来完成工作，在工作量不大的情况下完全可以做到0成本。
-- 计算机技能：整个工作流中我尽量减少了使用到命令行的场景，如果**不出差错**的话，你可以仅通过向AI发号施令和在图形界面的点击来完成整个流程；如果出了差错（像是环境的配置有问题），可能会需要多出一些些使用命令行侦错的步骤，但你把错误内容告诉AI后，AI会帮助你一步步地解决。
-- 科学上网：Of Course！！！
+## 使用门槛
 
-## 具体步骤
+你需要准备：
 
-### 1. 下载并安装所需的软件
-   - [Pandoc](https://github.com/jgm/pandoc/releases)：转换Markdown格式书籍为各种格式。
-   - [Python](https://www.python.org/downloads/)：处理执行各项代码任务。
-   - [Typora](https://typora.io/)：调用Pandoc；可视化查看markdown文件。
-   - [Antigravity](https://antigravity.google/)：Google的AI工具。
-   - [Antigravity Tools](https://github.com/lbjlaq/Antigravity-Manager)：为前者补充更多实用性。
-   - [我的skills](https://github.com/KyoSakuyo/skills)：谢谢您喜欢🥹
+- 一个能执行本地命令的 AI Agent，推荐 Codex。
+- Python 环境。
+- Pandoc，用于导出 EPUB。
+- Typora、Obsidian 或其他 Markdown 编辑器，用于人工检查和微调。
+- 你自己的 OpenAI 兼容 API。
 
-### 2. 配置Typora
+注意：本项目不会提供 API Key。OCR 和翻译都需要调用模型接口，请自行准备可用的 `base_url`、`api_key` 和 `model`。
 
-   - 打开Typora的偏好设置，在其导出面板中设置好Pandoc的安装位置。
+如果你没有直接可用的 API，可以考虑使用 [ProxyPal](https://github.com/heyhuynhgiabuu/proxypal) 等反代或本地 API 网关项目，把你已有的模型订阅转换为 OpenAI 兼容接口。无论使用哪种方式，都请确认它符合你的服务条款、隐私要求和当地法律法规。
 
-     ![image-20260126102128490](https://s2.loli.net/2026/01/26/buQD6iSyfoG5LwW.png)
+## 推荐模型
 
-     ![image-20260126102208105](https://s2.loli.net/2026/01/26/TsiMDSLBHelfy4R.png)
+推荐使用最新的 `gpt-5.5` 模型，尤其是 OCR、复杂排版、标题层级判断和翻译任务。
 
-### 3. 选择合适的目录
+如果你的 API 服务暂时没有开放 `gpt-5.5`，可以退而使用该服务中最新、最强的 GPT-5 系列视觉/多模态模型。OCR 阶段必须选择支持图片输入的模型。
 
-   - 在合适的目录（最好是纯英文路径）新建文件夹作为工作区。（以C盘根目录下的OCR文件夹为例）
+## 安装依赖
 
-   - 参考[Antigravity的文档](https://antigravity.google/docs/skills)，在该文件夹下新建`.agent\skills`目录，你将得到如下的目录结构：
+### 1. 安装基础软件
 
-     ![image-20260126110353891](https://s2.loli.net/2026/01/26/uBLZQ3GEXCRcF8S.png)
+- [Python](https://www.python.org/downloads/)：运行处理脚本。
+- [Pandoc](https://github.com/jgm/pandoc/releases)：将 Markdown 导出为 EPUB。
+- Markdown 编辑器：推荐 Typora 或 Obsidian。
+- AI Agent：推荐 Codex，也可以使用其他能运行本地命令的 Agent。
 
-   - 解压下载好的skills, 将pdf-set文件夹复制粘贴到上面的目录，结构如下
+### 2. 安装 Python 包
 
-     ![image-20260126110608095](https://s2.loli.net/2026/01/26/JTzL8oOrf6aE4mU.png)
+进入你的工作环境后安装：
 
-### 4. 配置 Antigravity Tools 
+```bash
+pip install pypdfium2 openai
+```
 
-   - 在Antigravity Tools的**账号管理**面板中**添加账号**，然后选择下方**操控**栏中的**切换到此账号**
+如果你使用 Codex，也可以直接让它执行：
 
-     ![image-20260126102703647](https://s2.loli.net/2026/01/26/QoAWTmeV8PHzv7w.png)
+```text
+使用 pdf-set 安装前置组件
+```
 
-   - 在Antigravity Tools的**API反代**面板中选择**启动服务**
+## 安装 skill
 
-     ![image-20260126103202804](https://s2.loli.net/2026/01/26/Ak6gXbsBLwx1d2p.png)
-     
-   - 打开工作区文件夹中的`.agent\skills\pdf-set\scripts`目录，找到`secrets.txt`
+### Codex 推荐方式
 
-     ![image-20260126110932232](https://s2.loli.net/2026/01/26/lDme7OLREQTS9pY.png)
+把本仓库中的 `pdf-set` 文件夹复制到 Codex 的 skills 目录：
 
-   - 在Antigravity Tools的**API反代**面板中找到**多协议支持**，选择Gemini协议后，在下面的**快速集成**选项中单击**复制**按钮，粘贴至`secrets.txt`中保存。
+```bash
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+cp -r pdf-set "${CODEX_HOME:-$HOME/.codex}/skills/pdf-set"
+```
 
-     ![image-20260126111052656](https://s2.loli.net/2026/01/26/JtndNwH2gGF87CT.png)
+Windows 用户可以放到：
 
-### 5. 进入Antigravity，打开工作区
+```text
+%USERPROFILE%\.codex\skills\pdf-set
+```
 
-   - 在Antigravity的主页面中选择**Open Folder**, 打开你刚刚建立的工作区文件夹
+也可以直接把整个仓库作为工作区打开，然后要求 Codex 使用当前仓库里的 `pdf-set`。
 
-   ![image-20260126111800920](https://s2.loli.net/2026/01/26/sQVh4zA8FYerfyn.png)
+### 其他 Agent
 
-   - 在你的workspace中新建文件夹，命名为你要转换的书籍名
-     ![image-20260126112402499](https://s2.loli.net/2026/01/26/aFkvQxUOrzdXeoj.png)
-     
-   - 将书籍粘贴至该目录下（直接拖拽或者复制粘贴）
+如果你的 Agent 不支持自动发现 skill，请让它先阅读：
 
-     ![image-20260126113007315](https://s2.loli.net/2026/01/26/IniCXFuyfDv4EJV.png)
+```text
+pdf-set/SKILL.md
+```
 
-### 6. 安装前置python组件：
+然后按 `SKILL.md` 中的 Task Map 选择对应 reference 文件执行。
 
-   - 对AI施咒：`导入该工作区内的.agent文件夹内的skill,用pdf-set安装前置组件`
+## 配置 API
 
-     AI会依次帮你安装后续工作所需安装的两个Python库，分别是[google-genai](https://pypi.org/project/google-genai/)和[pypdfium2](https://pypi.org/project/pypdfium2/)，如果出了问题，AI会一步步告诉你问题出在哪里并解决。
+打开：
 
-     ![image-20260126125950131](https://s2.loli.net/2026/01/26/cLVAl8j6qTG34fJ.png)
+```text
+pdf-set/assets/secrets_openai.txt
+```
 
-### 7. 将PDF转化为图片
+写入你自己的 OpenAI 兼容 API 配置：
 
-   - 对AI施咒：`导入该工作区内的.agent文件夹内的skill,用pdf-set对【书籍名】分图`
+```text
+base_url = "https://api.openai.com/v1"
+api_key = "你的_API_KEY"
+model = "gpt-5.5"
+```
 
-     AI会逐页地把PDF书籍转换为图片格式并且向你报告工作进度，输出结果会在`images`内
+如果你使用反代服务，例如本地网关或 ProxyPal，一般会类似这样：
 
-     ![image-20260126130307254](https://s2.loli.net/2026/01/26/aUy6Tu3ClQx4p8W.png)
+```text
+base_url = "http://127.0.0.1:8317/v1"
+api_key = "你的本地或反代 API Key"
+model = "gpt-5.5"
+```
 
-### 8. 开始OCR
+请不要把填好密钥的 `secrets_openai.txt` 上传到公开仓库。这个文件在项目中只应作为空占位文件存在。
 
-   - 对AI施咒：`导入该工作区内的.agent文件夹内的skill,用pdf-set对【书籍名】开始OCR`
+如果你在 Git 仓库里使用本项目，并且希望本地密钥不被误提交，可以执行：
 
-     AI会逐页地开始OCR, 并且向你报告工作进度，输出结果会在`ocr-result`内
+```bash
+git update-index --skip-worktree pdf-set/assets/secrets_openai.txt
+```
 
-     ![image-20260126113841068](https://s2.loli.net/2026/01/26/TkCczEVaxyRtJiH.png)
+## 建议目录结构
 
-### 9. （可选）OCR查漏补缺
+建议为每本书单独建立一个目录：
 
-   如果在ocr-result内有【序号.fail.md】的文件，则需要继续向AI施咒：`导入该工作区内的.agent文件夹内的skill,用pdf-set对【书籍名】进行OCR查漏补缺`，等待AI处理完毕后，检查补缺后的文件，若没有问题，手动删除*.fail.md文件。
+```text
+工作区/
+├── pdf-set/
+└── 书籍名/
+    └── 原书.pdf
+```
 
-![image-20260126130904089](https://s2.loli.net/2026/01/26/iljRy74sgEWkId8.png)
+实际处理过程中会逐步生成：
 
-![image-20260126131249624](https://s2.loli.net/2026/01/26/qoTlHbreYWQ8NPK.png)
+```text
+书籍名/
+├── images/
+├── ocr-result/
+├── merge-result/
+├── translate-result/
+├── 原书.pdf
+├── 书籍名.md
+└── 书籍名.epub
+```
 
-#### 为什么会fail？
+路径最好尽量避免奇怪符号。Windows 下如果遇到编码或命令行问题，优先使用纯英文工作区路径。
 
-因为Antigravity调用API会有道德审查──《索多玛120天》有一半内容都会被屏蔽掉，甚至一本弗洛伊德的精神分析案例书《鼠人》都能被屏蔽掉两三页……除此以外还有版权审查，sometimes 一本书正文都没事，但是最后译者的译后记（可能因为译者发送到了豆瓣上被AI拿来训练了）就被识别成了版权内容，禁止识别，like 《千高原》……
+## 基本流程
 
-而使用此skill中OCR查漏补缺的步骤可以变相避免审查发生。
+下面的示例都可以直接交给 Codex 或其他 Agent 执行。把 `【书籍名】` 替换成你的实际目录名。
 
-### 10. 粗合并
+### 1. PDF 分图
 
-- 对AI施咒：`导入该工作区内的.agent文件夹内的skill,用pdf-set对【书籍名】的全部OCR结果粗合并`
+```text
+使用 pdf-set 对【书籍名】分图
+```
 
-  ![image-20260126133643078](https://s2.loli.net/2026/01/26/cRFC8TlNMideXb5.png)
+输出目录：
 
-  命令执行后，会新建文件夹`merge-result`并在其中输出`0.rough.md`
+```text
+【书籍名】/images/
+```
 
-### 11. 修改标题层次
+### 2. OCR
 
-- 使用typora打开`0.rough.md`，打开文章大纲
+```text
+使用 pdf-set 对【书籍名】开始 OCR
+```
 
-  ![image-20260126134031911](https://s2.loli.net/2026/01/26/JhU49lIkgnDHMuE.png)
+输出目录：
 
-  所有的大标题小标题都被设计为了**二级标题**，你需要手动地给文章设计标题层级──
+```text
+【书籍名】/ocr-result/
+```
 
-  - 对照PDF源文件，在Typora的大纲中找到对应的标题内容
+OCR 会逐页调用你在 `secrets_openai.txt` 中配置的模型。大书会消耗较多 token 和时间，建议先拿少量页测试配置是否正常。
 
-  - 按下`Ctrl+1`设置为一级标题、按下`Ctrl+3`设置为三级标题……以此类推
+### 3. 粗合并
 
-  **注意：设计标题层次时不应给书名设为一级标题，各章节名设为二级标题──书名应该对应于该文件的文件名。**
+```text
+使用 pdf-set 对【书籍名】的全部 OCR 结果粗合并
+```
 
-  **你应该将书的各章节（第一章、第二章……），或书的各部分（第一部、第二部……）设为一级标题。**
+输出文件：
 
-  一份处理好的文章大纲应如下👇
+```text
+【书籍名】/merge-result/0.rough.md
+```
 
-  ![image-20260126134912395](https://s2.loli.net/2026/01/26/wrq9JEGMKZ5DFjz.png)
+### 4. 标题分类
 
-### 12. 分割&排版&排版合并
+```text
+使用 pdf-set 对【书籍名】标题分类
+```
 
-依次对AI施咒：
+这一步用于整理 `0.rough.md` 中的标题层级。建议完成后人工检查一次目录结构，尤其是章、节、附录、译后记等边界。
 
-- `导入该工作区内的.agent文件夹内的skill,用pdf-set对【书籍名】分割`
-- `导入该工作区内的.agent文件夹内的skill,用pdf-set对【书籍名】排版`
-- `导入该工作区内的.agent文件夹内的skill,用pdf-set对【书籍名】排版合并`
+### 5. 排版成书
 
-（或者一起施咒也行……）
+```text
+使用 pdf-set 对【书籍名】排版成书
+```
 
-![image-20260126140038043](https://s2.loli.net/2026/01/26/j5ViMNDp2wm4TPI.png)
+输出文件：
 
-工作区目录中会补全`merge-result`中的文件；新建`typeset-result`文件夹并输出排版好的各章节及全书文件──被命名为`【书籍名】.md` ，示例如下👇
+```text
+【书籍名】/【书籍名】.md
+```
 
-![image-20260126143003150](https://s2.loli.net/2026/01/26/n9c1Gt8srhNjHPz.png)
+这一步会处理硬断行、注释空行、章节拼接等问题。最终结果仍建议人工快速检查，特别是脚注、图片占位、表格和公式。
 
-### 13. 补全书籍图片和被分开的注释
+### 6. 导出 EPUB
 
-- 用typora打开`【书籍名.md】`文件，按下`Ctrl+F`搜寻⬆️这个emoji符号
-  ![image-20260126143125030](https://s2.loli.net/2026/01/26/vbrZTNB2pmkiR7G.png)
+```text
+使用 pdf-set 对【书籍名】导出 EPUB
+```
 
-  - 搜寻到的结果是被书籍的分页分开的注释，依次把它们手动地拼接上。
+输出文件：
 
-    ![image-20260126143311277](https://s2.loli.net/2026/01/26/lZrqx5tBzGb2E4I.png)
+```text
+【书籍名】/【书籍名】.epub
+```
 
-- 按下`Ctrl+F`搜寻🀄这个emoji符号，对应页码找到原书中的图片，截图原书，粘贴替换掉🀄
+导出依赖 Pandoc。若文档中包含图片，请确认图片文件仍在书籍目录中，并且 Markdown 中的路径可以正常访问。
 
-  ![image-20260126143747750](https://s2.loli.net/2026/01/26/bOInXGs3idPF2kQ.png)
+## 翻译流程
 
-### 14. 导出ePub
+如果需要翻译，建议先完成 OCR、粗合并、标题分类和排版成书，再进入翻译流程。
 
-- 在Typora中依次选择`文件`、`导出`、`Epub`，成功导出epub格式书籍🎉
+### 1. 翻译分割
 
-  ![image-20260126144212551](https://s2.loli.net/2026/01/26/HxJ2ynFN8CmaTG7.png)
+```text
+使用 pdf-set 对【书籍名】翻译分割
+```
 
-  开始阅读吧！
+### 2. 翻译
 
-  ![image-20260126144352253](https://s2.loli.net/2026/01/26/CAdzbO8D5FGLIyo.png)
+```text
+使用 pdf-set 对【书籍名】翻译
+```
 
-### 15. （可选）翻译
+翻译会消耗大量 API 额度。长章节建议分批处理，避免单次上下文过大导致模型遗漏、截断或格式混乱。
 
-如果你需要对提取出的内容翻译，可以对AI施咒：`导入该工作区内的.agent文件夹内的skill,用pdf-set对【书籍名】的【文件序号】翻译`
+### 3. 翻译排版
 
-注意：
+```text
+使用 pdf-set 对【书籍名】翻译排版
+```
 
-- 这里的文件序号对应的是分割后的文件序号，翻译的输入文件在`typeset-result`中。
-- 翻译会使用大量的AI额度，而且一次翻译的内容太多的话，AI会变得笨笨的；如果在完成分割后，每章节仍旧有超过100000字符的内容，建议再次做分割后再进行翻译。
-- 建议根据需要自行修改翻译prompt
+### 4. 翻译合并
 
-翻译后的结果会输出在`translate-result`中，检查无误后，对AI施咒：`导入该工作区内的.agent文件夹内的skill,用pdf-set对【书籍名】的翻译结果合并`，即可得到全书译文。
+```text
+使用 pdf-set 对【书籍名】翻译合并
+```
 
-## Q&A
+最终会得到合并后的译文或对照译文，具体输出以 Agent 执行时读取的 reference 说明为准。
 
-1. Q：什么类型的书籍无法被正确排版？
+## 直接运行脚本
 
-   A：注释格式过于诡异的书！你可以参考此skills的Github库中的`生成结果参考`中的《像女孩一样丢球》一书，因为原书的PDF格式是在随机1-x页正文后，才会出现一次对应前面好几页内容的尾注，会让AI整个晕掉😵‍💫──生成出的结果注释会乱掉，会稍微影响阅读体验。
+如果你不想让 Agent 自动执行，也可以手动运行脚本。下面是几个常见例子。
 
-2. Q：既然Antigravity本体没有内容审查，为什么要用Antigravity Tools来反代API呢？
+PDF 分图：
 
-   A：因为前者识图时无法准确识别每页的内容边界，很容易将前后页的内容弄混。
+```bash
+python pdf-set/scripts/convert_pdf_to_images.py --base-dir "书籍名"
+```
 
-3. Q：为什么我出现了Antigravity无法登录，python安装组件没反应……等情况？
+OCR：
 
-   A：很有可能是你的网络环境出了问题，请自行Google检索相关讯息后，检查你的网络配置。
+```bash
+python pdf-set/scripts/ocr.py --base-dir "书籍名"
+```
 
-4. Q：Typora有15天的免费使用期限，有什么替代方案吗？
+粗合并：
 
-   A：使用盗版的Typora…或者换用Obsidian, 安装一些可以调用pandoc导出文件的插件。
+```bash
+python pdf-set/scripts/merge_rough.py --base-dir "书籍名"
+```
 
+排版成书：
+
+```bash
+python pdf-set/scripts/typeset_book.py --base-dir "书籍名"
+```
+
+不同脚本支持的参数略有差异，最稳妥的方式仍然是让 Agent 先阅读 `pdf-set/SKILL.md` 和对应的 `pdf-set/references/*.md`。
+
+## 常见问题
+
+### Q：为什么必须自己提供 API？
+
+A：因为 OCR 和翻译都需要调用大模型。本项目只提供处理流程、脚本和 prompt，不提供模型服务，也不内置任何密钥。
+
+### Q：可以不用 OpenAI 官方接口吗？
+
+A：可以。脚本使用 OpenAI Python SDK，但只要求接口兼容 OpenAI API 格式。你可以使用官方 API，也可以使用支持 OpenAI 兼容格式的第三方服务、本地网关或反代服务。
+
+### Q：没有 API 怎么办？
+
+A：可以考虑使用 ProxyPal 等项目，将你已有的模型订阅或本地服务转换为 OpenAI 兼容接口。请自行确认安全性、稳定性、隐私策略和服务条款。
+
+### Q：为什么 OCR 结果会有错误？
+
+A：扫描质量、字体、竖排、繁体、旧字形、图片压缩、页面倾斜、页眉页脚和复杂注释都会影响 OCR。建议先用少量页测试 prompt 和模型，再处理整本书。
+
+### Q：为什么翻译结果会漏段或格式乱？
+
+A：通常是单次输入太长、章节结构太复杂，或模型上下文压力过大。建议先分割，再分批翻译，并在翻译后进行人工检查。
+
+### Q：Typora 必须买吗？
+
+A：不是。Typora 只是比较方便的 Markdown 编辑器。你也可以使用 Obsidian、VS Code 或其他编辑器；导出 EPUB 的关键依赖是 Pandoc。
+
+## 注意事项
+
+- 请只处理你有权处理的文档。
+- 不要把自己的 API Key、反代密钥或本地网关凭据提交到仓库。
+- 大规模 OCR 和翻译前，先用 5-10 页测试模型、费用和输出质量。
+- 最终成书前务必人工检查标题层级、注释、图片、表格和公式。
+- 如果 Agent 执行失败，把完整报错发给它，让它根据当前目录和 reference 文件继续排查。

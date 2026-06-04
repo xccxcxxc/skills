@@ -6,7 +6,6 @@ import re
 DEFAULT_INPUT_DIRNAME = 'ocr-result'
 DEFAULT_OUTPUT_DIRNAME = 'merge-result'
 DEFAULT_OUTPUT_FILENAME = '0.rough.md'
-BLANK_PAGE_MARKER = "\U0001F233"
 
 def read_single_path(path):
     with open(path, 'r', encoding='utf-8') as f:
@@ -19,72 +18,22 @@ def read_single_path(path):
 def get_natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', s)]
 
-HEADING_DEDUPE_EXEMPT_TERMS = (
-    "translator's notes", "translator's note", "editor's notes", "editor's note",
-    "annotations", "annotation", "introduction", "appendices", "abstract",
-    "foreword", "preface", "prologue", "summary", "appendix", "notes", "note",
-    "内容提要", "內容提要", "译者序", "譯者序", "编者按", "編者按",
-    "注释", "註釋", "注解", "註解", "注记", "註記", "附注", "附註",
-    "脚注", "腳註", "尾注", "尾註", "笺注", "箋註", "摘要", "提要",
-    "导言", "導言", "前言", "序言", "引言", "绪论", "緒論", "引论",
-    "引論", "译序", "譯序", "作者序", "凡例", "说明", "說明", "附录",
-    "附錄", "补遗", "補遺", "后记", "後記", "案语", "按语", "注", "註",
-    "序", "跋",
-)
+def clean_page_content(content):
+    lines = []
+    previous_blank = False
 
-HEADING_DEDUPE_EXEMPT_SUFFIX_RE = re.compile(r"^(\s|[:：.,，;；、\-—_()\[\]{}（）【】《》「」『』]|[0-9ivxlcdm一二三四五六七八九十]+|第)")
+    for line in content.splitlines():
+        if '🈳' in line:
+            continue
 
-def _is_heading_dedupe_exempt(title):
-    normalized = re.sub(r'[`*_~]+', '', title).strip().lower()
-    normalized = re.sub(r'\s+', ' ', normalized)
+        is_blank = not line.strip()
+        if is_blank and previous_blank:
+            continue
 
-    for term in HEADING_DEDUPE_EXEMPT_TERMS:
-        term = term.lower()
-        if normalized == term:
-            return True
-        if normalized.startswith(term):
-            rest = normalized[len(term):]
-            if HEADING_DEDUPE_EXEMPT_SUFFIX_RE.match(rest):
-                return True
-    return False
+        lines.append(line)
+        previous_blank = is_blank
 
-def _dedupe_headings(merged_text):
-    lines = [
-        line for line in merged_text.splitlines()
-        if BLANK_PAGE_MARKER not in line
-    ]
-    seen_titles = set()
-    out_lines = []
-    # Allow leading whitespace before markdown headings from OCR output.
-    heading_re = re.compile(r'^\s*(#{1,6})\s+(.+?)\s*$')
-
-    for line in lines:
-        m = heading_re.match(line)
-        if m:
-            title = m.group(2).strip()
-            dedupe_exempt = _is_heading_dedupe_exempt(title)
-            if not dedupe_exempt and title in seen_titles:
-                # Remove duplicate heading and ensure single blank line separation
-                if out_lines and out_lines[-1].strip() != "":
-                    out_lines.append("")
-                continue
-            if not dedupe_exempt:
-                seen_titles.add(title)
-        out_lines.append(line)
-
-    # Collapse consecutive blank lines to a single blank line
-    cleaned = []
-    prev_blank = False
-    for line in out_lines:
-        is_blank = (line.strip() == "")
-        if is_blank:
-            if not prev_blank:
-                cleaned.append("")
-            prev_blank = True
-        else:
-            cleaned.append(line)
-            prev_blank = False
-    return "\n".join(cleaned).strip() + "\n"
+    return "\n".join(lines).strip()
 
 def merge_ocr_results(input_dir, output_dir, output_file):
     if not os.path.exists(input_dir):
@@ -101,13 +50,12 @@ def merge_ocr_results(input_dir, output_dir, output_file):
     for filename in md_files:
         filepath = os.path.join(input_dir, filename)
         with open(filepath, 'r', encoding='utf-8') as f:
-            content = f.read().strip()
+            content = clean_page_content(f.read())
             if content:
                 all_content.append(content)
 
     # Join with a single blank line (two newlines)
     merged_content = "\n\n".join(all_content)
-    merged_content = _dedupe_headings(merged_content)
 
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(merged_content)

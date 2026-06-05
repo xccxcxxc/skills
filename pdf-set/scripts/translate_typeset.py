@@ -29,6 +29,13 @@ TRAILING_CLOSERS = {
 
 SUP_RE = re.compile(r"<sup>(.*?)</sup>", re.DOTALL | re.IGNORECASE)
 IMAGE_RE = re.compile(r"!\[[^\]]*]\([^)]+\)")
+SHORT_QUESTION_BRACKET_MAX = 80
+QUESTION_BRACKET_PAIRS = (
+    ("(", ")"),
+    ("（", "）"),
+    ("[", "]"),
+    ("【", "】"),
+)
 
 ABBREVIATIONS = {
     "M",
@@ -146,13 +153,36 @@ def is_lowercase_continuation_dot(text, i):
     return ch.isalpha() and ch.islower()
 
 
+def is_short_parenthetical_question(text, i):
+    for opener, closer in QUESTION_BRACKET_PAIRS:
+        start = text.rfind(opener, 0, i + 1)
+        if start < 0:
+            continue
+
+        end = text.find(closer, i + 1)
+        if end < 0:
+            continue
+
+        segment = text[start : end + 1]
+        if "\n" in segment or len(segment) > SHORT_QUESTION_BRACKET_MAX:
+            continue
+        if "?" not in segment and "？" not in segment:
+            continue
+
+        if any(text.rfind(other_closer, start, i) > start for _, other_closer in QUESTION_BRACKET_PAIRS):
+            continue
+
+        return True
+    return False
+
+
 def find_punctuation_positions(text, spans):
     positions = []
     i = 0
     while i < len(text):
         ch = text[i]
         if ch in {"。", "？", "！", "?", "!"}:
-            if not is_protected(spans, i):
+            if not is_protected(spans, i) and not is_short_parenthetical_question(text, i):
                 positions.append(i)
         elif ch == ".":
             # Do not split inside ellipsis like "..."

@@ -21,11 +21,18 @@ CRITICAL:
   - 输出：`<当前目录>/ocr-result/`
   - Prompt：`<skill-dir>/assets/ocr_prompt.md`
 
-### 多模型 / 多账号配置（推荐）
+### 模型配置
 
-可同时配置多组 OCR 后端。某一组额度耗尽、返回 429/503 等临时错误时，脚本会**自动切换**到下一组继续。
+可同时**保存**多组 OCR 后端，但运行时**只使用一组**：`PDF_OCR_PROFILE` 或 `--profile` 指定的那一组。
 
-#### 方式 A：环境变量（Minis / OpenClaw 推荐）
+#### 严格规则
+
+- **不并发**：始终串行，一次只处理一页。
+- **不自动切换**：不会在失败时改用其他 profile。
+- **503 / 额度耗尽 / 临时服务不可用**：直接报错退出。
+- 需要换模型时：手动改 `PDF_OCR_PROFILE`，或下次运行加 `--profile backup`。
+
+#### 方式 A：环境变量多 profile（推荐）
 
 1. 声明 profile 列表：
 
@@ -45,11 +52,11 @@ PDF_OCR_BACKUP_API_KEY=...
 PDF_OCR_BACKUP_MODEL=vision-model-b
 ```
 
-3. 可选：指定启动时优先使用的 profile
+3. 指定本次实际使用的 profile：
 
 ```bash
-PDF_OCR_PROFILE=backup
-# 或命令行：
+PDF_OCR_PROFILE=primary
+# 或命令行覆盖：
 python scripts/ocr.py --profile backup --base-dir "书籍目录"
 ```
 
@@ -89,22 +96,13 @@ api_key = "..."
 model = "..."
 ```
 
-### 自动切换规则
-
-遇到以下情况会把当前 profile 标记为不可用并切到下一组：
-
-- HTTP `402 / 403 / 408 / 429 / 500 / 502 / 503 / 504`
-- 错误信息包含 `quota` / `rate limit` / `overloaded` / `temporarily unavailable` 等
-
-所有 profile 都不可用时任务退出；已完成页面保留在 `ocr-result/`，下次可断点续跑。
-
 ### 查看已配置 profile（不输出密钥）
 
 ```bash
 python .agent/skills/pdf-set/scripts/ocr.py --list-profiles
 ```
 
-### 路径与批处理参数
+### 路径参数
 
 - 可选参数：
   - `--base-dir` 指定书籍目录
@@ -115,9 +113,9 @@ python .agent/skills/pdf-set/scripts/ocr.py --list-profiles
   - `--output-file` 指定单张输出 Markdown 文件路径
   - `--start` 指定起始序号（含）
   - `--end` 指定结束序号（含）
-  - `--batch-size` 指定并发批次大小
+  - `--batch-size` 已忽略；OCR 始终串行
   - `--prompt-file` 指定 prompt 文件路径
-  - `--profile` 指定起始 OCR profile
+  - `--profile` 指定本次使用的 OCR profile
   - `--list-profiles` 列出可用 profile 后退出
   - `--base-dir-from` 使用 UTF-8 文本文件提供书籍目录（首个非空行）
   - `--input-dir-from` 使用 UTF-8 文本文件提供输入目录（首个非空行）
@@ -132,7 +130,7 @@ python .agent/skills/pdf-set/scripts/ocr.py --list-profiles
 python .agent/skills/pdf-set/scripts/ocr.py --base-dir "C:\path\to" --book-name "某书" --start 0 --end 20
 ```
 
-指定备用模型起步：
+手动指定另一组模型：
 
 ```bash
 python .agent/skills/pdf-set/scripts/ocr.py --base-dir "C:\path\to\某书" --profile backup

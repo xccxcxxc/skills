@@ -13,27 +13,35 @@ from openai import OpenAI
 SCRIPT_DIR = os.path.dirname(__file__)
 ASSETS_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "assets"))
 
-# Errors that usually mean "this provider/model is temporarily unusable; try next profile".
-_SWITCHABLE_STATUS_CODES = {402, 403, 408, 429, 500, 502, 503, 504}
-_SWITCHABLE_MESSAGE_MARKERS = (
+# Temporary provider issues: rotate profile, but do NOT permanently discard it.
+_TRANSIENT_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+# Likely account/quota issues: mark profile exhausted for this run.
+_EXHAUST_STATUS_CODES = {402, 403}
+_TRANSIENT_MESSAGE_MARKERS = (
     "service temporarily unavailable",
     "rate limit",
     "rate_limit",
     "too many requests",
-    "quota",
-    "insufficient",
     "overloaded",
     "capacity",
     "resource exhausted",
     "resource_exhausted",
-    "billing",
-    "credit",
-    "balance",
-    "exceeded",
     "temporarily unavailable",
     "model is overloaded",
     "server error",
     "upstream",
+    "timeout",
+    "timed out",
+)
+_EXHAUST_MESSAGE_MARKERS = (
+    "quota",
+    "insufficient",
+    "billing",
+    "credit",
+    "balance",
+    "exceeded your current quota",
+    "payment required",
+    "permission denied",
 )
 
 
@@ -279,58 +287,141 @@ class ProfileManager:
                 raise ValueError(f"OCR profile '{start_name}' not found. Available: {available}")
         self._clients = {}
         self._exhausted = set()
+        # name -> unix timestamp until which this profile is temporarily skipped
+        self._cooldown_until = {}
 
     def list_public(self):
-        return [
-            {
-                "name": p["name"],
-                "base_url": p["base_url"],
-                "model": p["model"],
-                "active": i == self._index,
-            }
-            for i, p in enumerate(self.profiles)
-        ]
+        now = time.time()
+        with self._lock:
+            return [
+                {
+                    "name": p["name"],
+                    "base_url": p["base_url"],
+                    "model": p["model"],
+                    "active": i == self._index,
+                    "exhausted": p["name"] in self._exhausted,
+                    "cooldown_remaining": max(
+                        0, int(self._cooldown_until.get(p["name"], 0) - now)
+                    ),
+                }
+                for i, p in enumerate(self.profiles)
+            ]
 
     def current(self):
         with self._lock:
             return dict(self.profiles[self._index])
 
+    def _is_temporarily_skipped(self, name, now=None):
+        now = time.time() if now is None else now
+        until = self._cooldown_until.get(name, 0)
+        return until > now
+
     def client(self):
         with self._lock:
-            profile = self.profiles[self._index]
-            name = profile["name"]
-            if name not in self._clients:
-                self._clients[name] = OpenAI(
-                    base_url=profile["base_url"],
-                    api_key=profile["api_key"],
-                )
-            return self._clients[name], dict(profile)
+            now = time.time()
+            total = len(self.profiles)
+            # Prefer a profile that is neither exhausted nor cooling down.
+            for step in range(total):
+                idx = (self._index + step) % total
+                profile = self.profiles[idx]
+                name = profile["name"]
+                if name in self._exhausted:
+                    continue
+                if self._is_temporarily_skipped(name, now):
+                    continue
+                self._index = idx
+                if name not in self._clients:
+                    self._clients[name] = OpenAI(
+                        base_url=profile["base_url"],
+                        api_key=profile["api_key"],
+                    )
+                return self._clients[name], dict(profile)
 
-    def mark_exhausted_and_switch(self, reason=""):
+            # All profiles are cooling down or exhausted. Wait for the soonest cooldown.
+            wait_candidates = [
+                (name, until)
+                for name, until in self._cooldown_until.items()
+                if name not in self._exhausted and until > now
+            ]
+            if wait_candidates:
+                name, until = min(wait_candidates, key=lambda x: x[1])
+                wait_s = max(1, int(until - now) + 1)
+                print(
+                    f"\n[profile] all free profiles cooling down; "
+                    f"waiting {wait_s}s for '{name}'..."
+                )
+                # Release lock while sleeping.
+            else:
+                wait_s = 0
+                name = None
+
+        if wait_s > 0:
+            time.sleep(wait_s)
+            with self._lock:
+                for i, profile in enumerate(self.profiles):
+                    if profile["name"] == name:
+                        self._index = i
+                        if name not in self._clients:
+                            self._clients[name] = OpenAI(
+                                base_url=profile["base_url"],
+                                api_key=profile["api_key"],
+                            )
+                        print(
+                            f"[profile] resuming '{profile['name']}' "
+                            f"(model={profile['model']})"
+                        )
+                        return self._clients[name], dict(profile)
+
+        raise RuntimeError("All OCR profiles exhausted or unavailable.")
+
+    def switch(self, reason="", permanent=False, cooldown_seconds=30):
         with self._lock:
             current = self.profiles[self._index]
-            self._exhausted.add(current["name"])
-            print(
-                f"\n[profile] '{current['name']}' unusable"
-                + (f": {reason}" if reason else "")
-                + "; switching..."
-            )
+            now = time.time()
+            if permanent:
+                self._exhausted.add(current["name"])
+                print(
+                    f"\n[profile] '{current['name']}' exhausted"
+                    + (f": {reason}" if reason else "")
+                    + "; switching..."
+                )
+            else:
+                until = now + max(1, int(cooldown_seconds))
+                # Keep the longer cooldown if concurrent workers hit the same profile.
+                prev = self._cooldown_until.get(current["name"], 0)
+                self._cooldown_until[current["name"]] = max(prev, until)
+                print(
+                    f"\n[profile] '{current['name']}' temporary issue"
+                    + (f": {reason}" if reason else "")
+                    + f"; cooldown {int(self._cooldown_until[current['name']] - now)}s; switching..."
+                )
+
             total = len(self.profiles)
             for step in range(1, total + 1):
                 nxt = (self._index + step) % total
                 candidate = self.profiles[nxt]
-                if candidate["name"] not in self._exhausted:
-                    self._index = nxt
-                    print(
-                        f"[profile] now using '{candidate['name']}' "
-                        f"(model={candidate['model']})"
-                    )
-                    return dict(candidate)
+                name = candidate["name"]
+                if name in self._exhausted:
+                    continue
+                if self._is_temporarily_skipped(name, now):
+                    continue
+                self._index = nxt
+                print(
+                    f"[profile] now using '{candidate['name']}' "
+                    f"(model={candidate['model']})"
+                )
+                return dict(candidate)
             return None
 
     def available_count(self):
+        now = time.time()
         with self._lock:
-            return sum(1 for p in self.profiles if p["name"] not in self._exhausted)
+            return sum(
+                1
+                for p in self.profiles
+                if p["name"] not in self._exhausted
+                and not self._is_temporarily_skipped(p["name"], now)
+            )
 
 
 PROFILE_MANAGER = None
@@ -495,98 +586,114 @@ def _error_status_code(exc):
     return None
 
 
-def _is_switchable_error(exc):
+def _classify_provider_error(exc):
+    """
+    Return one of: 'exhaust', 'transient', None
+    """
     status = _error_status_code(exc)
-    if status in _SWITCHABLE_STATUS_CODES:
-        return True
     text = str(exc).lower()
-    return any(marker in text for marker in _SWITCHABLE_MESSAGE_MARKERS)
+    if status in _EXHAUST_STATUS_CODES:
+        return "exhaust"
+    if status in _TRANSIENT_STATUS_CODES:
+        return "transient"
+    if any(marker in text for marker in _EXHAUST_MESSAGE_MARKERS):
+        return "exhaust"
+    if any(marker in text for marker in _TRANSIENT_MESSAGE_MARKERS):
+        return "transient"
+    return None
+
+
+def _is_switchable_error(exc):
+    return _classify_provider_error(exc) is not None
+
+
+def _cooldown_seconds_for_error(exc):
+    status = _error_status_code(exc)
+    text = str(exc).lower()
+    if status == 429 or "rate limit" in text or "too many requests" in text:
+        return 60
+    if status in {500, 502, 503, 504} or "temporarily unavailable" in text:
+        return 45
+    return 30
 
 
 def extract_text_from_openai_api(image_path, page_num, prompt_text):
     """
-    Send one image to the current OCR profile.
-    Automatically rotates profiles on quota / temporary service errors.
+    Send one image to the configured OCR profile only.
+    No auto-switch. On 503 / temporary provider errors, raise immediately.
     """
     prohibited_sentinel = "__PROHIBITED_CONTENT__"
+    client, profile = PROFILE_MANAGER.client()
+    selected_model = profile["model"]
+    max_attempts = 3
     last_error_message = None
-    attempts_per_profile = 3
 
-    while True:
-        client, profile = PROFILE_MANAGER.client()
-        selected_model = profile["model"]
-        for attempt in range(1, attempts_per_profile + 1):
-            try:
-                image_bytes = _read_image_bytes(image_path)
-                image_filename = os.path.basename(image_path)
-                mime_type = _guess_mime_type(image_path)
-                image_b64 = base64.b64encode(image_bytes).decode("ascii")
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt_text},
-                            {"type": "text", "text": f"文件名：{image_filename}"},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
-                            },
-                        ],
-                    }
-                ]
-                response = client.chat.completions.create(
-                    model=selected_model,
-                    messages=messages,
-                )
+    for attempt in range(1, max_attempts + 1):
+        try:
+            image_bytes = _read_image_bytes(image_path)
+            image_filename = os.path.basename(image_path)
+            mime_type = _guess_mime_type(image_path)
+            image_b64 = base64.b64encode(image_bytes).decode("ascii")
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {"type": "text", "text": f"文件名：{image_filename}"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
+                        },
+                    ],
+                }
+            ]
+            response = client.chat.completions.create(
+                model=selected_model,
+                messages=messages,
+            )
 
-                finish_reason = _get_finish_reason(response)
-                if finish_reason and "CONTENT_FILTER" in finish_reason.upper():
-                    return prohibited_sentinel
-                if finish_reason and "PROHIBITED_CONTENT" in finish_reason.upper():
-                    return prohibited_sentinel
+            finish_reason = _get_finish_reason(response)
+            if finish_reason and "CONTENT_FILTER" in finish_reason.upper():
+                return prohibited_sentinel
+            if finish_reason and "PROHIBITED_CONTENT" in finish_reason.upper():
+                return prohibited_sentinel
 
-                content_text = _extract_text_from_response(response)
-                if content_text:
-                    return content_text
+            content_text = _extract_text_from_response(response)
+            if content_text:
+                return content_text
 
-            except Exception as e:
-                error_message = f"\nError processing page {page_num} via profile '{profile['name']}':\n"
-                error_message += f"Error Type: {type(e).__name__}\n"
-                error_message += f"Error Message: {str(e)}\n"
-                status = _error_status_code(e)
-                if status is not None:
-                    error_message += f"Status Code: {status}\n"
-                if hasattr(e, "response"):
-                    error_message += f"Response: {e.response}\n"
-                last_error_message = error_message
+            last_error_message = (
+                f"Empty OCR response for page {page_num} "
+                f"via profile '{profile['name']}' (attempt {attempt}/{max_attempts})"
+            )
 
-                if _is_switchable_error(e):
-                    reason = f"{type(e).__name__}"
-                    if status is not None:
-                        reason += f" {status}"
-                    nxt = PROFILE_MANAGER.mark_exhausted_and_switch(reason=reason)
-                    if nxt is None:
-                        if last_error_message:
-                            print(last_error_message)
-                        raise RuntimeError(
-                            "All OCR profiles exhausted or unavailable.\n"
-                            + (last_error_message or str(e))
-                        ) from e
-                    # switch immediately and restart attempts on the new profile
-                    break
+        except Exception as e:
+            error_message = f"\nError processing page {page_num} via profile '{profile['name']}':\n"
+            error_message += f"Error Type: {type(e).__name__}\n"
+            error_message += f"Error Message: {str(e)}\n"
+            status = _error_status_code(e)
+            if status is not None:
+                error_message += f"Status Code: {status}\n"
+            if hasattr(e, "response"):
+                error_message += f"Response: {e.response}\n"
+            last_error_message = error_message
 
-                if attempt >= attempts_per_profile:
-                    if last_error_message:
-                        print(last_error_message)
-                    raise RuntimeError(last_error_message or str(e)) from e
+            # Strict mode: temporary provider/quota issues fail immediately.
+            if _is_switchable_error(e) or status == 503:
+                print(error_message)
+                raise RuntimeError(
+                    f"OCR profile '{profile['name']}' failed"
+                    + (f" with status {status}" if status is not None else "")
+                    + f": {e}"
+                ) from e
 
-                # non-switchable transient: short backoff then retry same profile
-                time.sleep(min(2 ** attempt, 8))
-        else:
-            # exhausted attempts on this profile without return/break
-            continue
+            if attempt >= max_attempts:
+                print(error_message)
+                raise RuntimeError(error_message) from e
 
-    return None
+            time.sleep(min(2 ** attempt, 8))
+
+    raise RuntimeError(last_error_message or f"OCR failed for page {page_num}")
 
 
 def process_images(images_dir, output_dir, prompt_text, start_idx=None, end_idx=None, batch_size=3):
@@ -624,11 +731,22 @@ def process_images(images_dir, output_dir, prompt_text, start_idx=None, end_idx=
 
     total = len(image_files)
     fail_count = 0
-    fail_lock = Lock()
 
-    def _process_one(image_path, idx):
-        nonlocal fail_count
-        text = extract_text_from_openai_api(image_path, idx, prompt_text)
+    # Strict serial mode: ignore concurrent batching.
+    if batch_size not in (None, 1):
+        print(f"Ignoring --batch-size={batch_size}; OCR always runs serially (batch_size=1).")
+    batch_size = 1
+
+    completed = 0
+    items = list(enumerate(image_files, start=1))
+    update_progress(0, total)
+    for idx, image_path in items:
+        try:
+            text = extract_text_from_openai_api(image_path, idx, prompt_text)
+        except Exception as e:
+            print(f"\n{e}")
+            sys.exit(1)
+
         base_name = os.path.splitext(os.path.basename(image_path))[0]
         if text == "__PROHIBITED_CONTENT__":
             out_path = os.path.join(output_dir, f"{base_name}.fail.md")
@@ -637,34 +755,20 @@ def process_images(images_dir, output_dir, prompt_text, start_idx=None, end_idx=
                     md_file.write("")
             except Exception:
                 pass
-            with fail_lock:
-                fail_count += 1
-            return
-        if text is None:
-            raise RuntimeError(f"No content after retries on page {idx}. Please intervene.")
-        out_path = os.path.join(output_dir, f"{base_name}.md")
-        try:
-            with open(out_path, "w", encoding="utf-8") as md_file:
-                md_file.write(text)
-        except Exception:
-            pass
+            fail_count += 1
+        elif text is None:
+            print(f"\nNo content after retries on page {idx}. Please intervene.")
+            sys.exit(1)
+        else:
+            out_path = os.path.join(output_dir, f"{base_name}.md")
+            try:
+                with open(out_path, "w", encoding="utf-8") as md_file:
+                    md_file.write(text)
+            except Exception:
+                pass
 
-    completed = 0
-    batch_size = max(1, int(batch_size))
-    items = list(enumerate(image_files, start=1))
-    update_progress(0, total)
-    for i in range(0, total, batch_size):
-        batch = items[i : i + batch_size]
-        with ThreadPoolExecutor(max_workers=batch_size) as executor:
-            futures = [executor.submit(_process_one, image_path, idx) for idx, image_path in batch]
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    print(f"\n{e}")
-                    sys.exit(1)
-                completed += 1
-                update_progress(completed, total)
+        completed += 1
+        update_progress(completed, total)
 
     if fail_count:
         print(f"Fail pages: {fail_count}")
@@ -782,8 +886,8 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=3,
-        help="Concurrent batch size (default: 3).",
+        default=None,
+        help="Concurrent batch size (default: PDF_OCR_BATCH_SIZE or 2).",
     )
     parser.add_argument(
         "--prompt-file",
@@ -823,8 +927,15 @@ def main():
         print("Configured OCR profiles:")
         for item in PROFILE_MANAGER.list_public():
             mark = "*" if item["active"] else " "
+            flags = []
+            if item.get("exhausted"):
+                flags.append("exhausted")
+            if item.get("cooldown_remaining"):
+                flags.append(f"cooldown={item['cooldown_remaining']}s")
+            flag_text = f" [{', '.join(flags)}]" if flags else ""
             print(
-                f"  {mark} {item['name']}: model={item['model']} base_url={item['base_url']}"
+                f"  {mark} {item['name']}: model={item['model']} "
+                f"base_url={item['base_url']}{flag_text}"
             )
         return
 
@@ -833,9 +944,8 @@ def main():
         f"Active OCR profile: {current['name']} "
         f"(model={current['model']}, base_url={current['base_url']})"
     )
-    if len(PROFILE_MANAGER.profiles) > 1:
-        names = ", ".join(p["name"] for p in PROFILE_MANAGER.profiles)
-        print(f"Profiles available for auto-switch: {names}")
+    print("Mode: serial only; no auto profile switch. Temporary 503/quota errors fail immediately.")
+    args.batch_size = 1
 
     base_dir = args.base_dir
     if args.base_dir_from:

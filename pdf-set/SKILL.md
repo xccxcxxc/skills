@@ -32,7 +32,8 @@ Use the correct subtask file based on the user's request. Each subtask is a stan
   - `PDF_OCR_<NAME>_BASE_URL` / `PDF_OCR_<NAME>_API_KEY` / `PDF_OCR_<NAME>_MODEL`
   - `PDF_OCR_PROFILE=<name>` selects the only profile used for this run
 - Legacy single-profile env still works: `PDF_OCR_BASE_URL` / `PDF_OCR_API_KEY` / `PDF_OCR_MODEL`
-- OCR is strictly serial (one page at a time). No concurrent batches. No auto profile switch.
+- OCR uses a single profile only. No auto profile switch.
+- Concurrency is configurable via `PDF_OCR_BATCH_SIZE` (default 6). CLI `--batch-size` overrides the env var.
 - On 503 / quota / temporary provider errors: fail immediately and exit.
 - Manual switch for the next run: change `PDF_OCR_PROFILE` or pass `--profile backup`
 - List profiles (no secrets): `python scripts/ocr.py --list-profiles`

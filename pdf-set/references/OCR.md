@@ -27,8 +27,9 @@ CRITICAL:
 
 #### 严格规则
 
-- **不并发**：始终串行，一次只处理一页。
+- **只用一组**：始终使用 `PDF_OCR_PROFILE` / `--profile` 指定的 profile。
 - **不自动切换**：不会在失败时改用其他 profile。
+- **默认并发 6 页**：可用 `--batch-size` 或环境变量 `PDF_OCR_BATCH_SIZE` 调整。
 - **503 / 额度耗尽 / 临时服务不可用**：直接报错退出。
 - 需要换模型时：手动改 `PDF_OCR_PROFILE`，或下次运行加 `--profile backup`。
 
@@ -59,6 +60,16 @@ PDF_OCR_PROFILE=primary
 # 或命令行覆盖：
 python scripts/ocr.py --profile backup --base-dir "书籍目录"
 ```
+
+4. 配置并发页数：
+
+```bash
+PDF_OCR_BATCH_SIZE=6
+# 或命令行覆盖：
+python scripts/ocr.py --batch-size 6 --base-dir "书籍目录"
+```
+
+优先级：`--batch-size` > `PDF_OCR_BATCH_SIZE` > 默认 `6`。
 
 #### 方式 B：兼容旧的单组环境变量
 
@@ -113,7 +124,7 @@ python .agent/skills/pdf-set/scripts/ocr.py --list-profiles
   - `--output-file` 指定单张输出 Markdown 文件路径
   - `--start` 指定起始序号（含）
   - `--end` 指定结束序号（含）
-  - `--batch-size` 已忽略；OCR 始终串行
+  - `--batch-size` 并发页数（默认 6；也可用 `PDF_OCR_BATCH_SIZE`）
   - `--prompt-file` 指定 prompt 文件路径
   - `--profile` 指定本次使用的 OCR profile
   - `--list-profiles` 列出可用 profile 后退出

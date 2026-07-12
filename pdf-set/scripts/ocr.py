@@ -696,7 +696,7 @@ def extract_text_from_openai_api(image_path, page_num, prompt_text):
     raise RuntimeError(last_error_message or f"OCR failed for page {page_num}")
 
 
-def process_images(images_dir, output_dir, prompt_text, start_idx=None, end_idx=None, batch_size=3):
+def process_images(images_dir, output_dir, prompt_text, start_idx=None, end_idx=None, batch_size=6):
     if not os.path.isdir(images_dir):
         print(f"Images directory not found: {images_dir}")
         return
@@ -731,22 +731,11 @@ def process_images(images_dir, output_dir, prompt_text, start_idx=None, end_idx=
 
     total = len(image_files)
     fail_count = 0
+    fail_lock = Lock()
 
-    # Strict serial mode: ignore concurrent batching.
-    if batch_size not in (None, 1):
-        print(f"Ignoring --batch-size={batch_size}; OCR always runs serially (batch_size=1).")
-    batch_size = 1
-
-    completed = 0
-    items = list(enumerate(image_files, start=1))
-    update_progress(0, total)
-    for idx, image_path in items:
-        try:
-            text = extract_text_from_openai_api(image_path, idx, prompt_text)
-        except Exception as e:
-            print(f"\n{e}")
-            sys.exit(1)
-
+    def _process_one(image_path, idx):
+        nonlocal fail_count
+        text = extract_text_from_openai_api(image_path, idx, prompt_text)
         base_name = os.path.splitext(os.path.basename(image_path))[0]
         if text == "__PROHIBITED_CONTENT__":
             out_path = os.path.join(output_dir, f"{base_name}.fail.md")
@@ -755,20 +744,34 @@ def process_images(images_dir, output_dir, prompt_text, start_idx=None, end_idx=
                     md_file.write("")
             except Exception:
                 pass
-            fail_count += 1
-        elif text is None:
-            print(f"\nNo content after retries on page {idx}. Please intervene.")
-            sys.exit(1)
-        else:
-            out_path = os.path.join(output_dir, f"{base_name}.md")
-            try:
-                with open(out_path, "w", encoding="utf-8") as md_file:
-                    md_file.write(text)
-            except Exception:
-                pass
+            with fail_lock:
+                fail_count += 1
+            return
+        if text is None:
+            raise RuntimeError(f"No content after retries on page {idx}. Please intervene.")
+        out_path = os.path.join(output_dir, f"{base_name}.md")
+        try:
+            with open(out_path, "w", encoding="utf-8") as md_file:
+                md_file.write(text)
+        except Exception:
+            pass
 
-        completed += 1
-        update_progress(completed, total)
+    completed = 0
+    batch_size = max(1, int(batch_size or 1))
+    items = list(enumerate(image_files, start=1))
+    update_progress(0, total)
+    for i in range(0, total, batch_size):
+        batch = items[i : i + batch_size]
+        with ThreadPoolExecutor(max_workers=batch_size) as executor:
+            futures = [executor.submit(_process_one, image_path, idx) for idx, image_path in batch]
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"\n{e}")
+                    sys.exit(1)
+                completed += 1
+                update_progress(completed, total)
 
     if fail_count:
         print(f"Fail pages: {fail_count}")
@@ -887,7 +890,7 @@ def main():
         "--batch-size",
         type=int,
         default=None,
-        help="Concurrent batch size (default: PDF_OCR_BATCH_SIZE or 2).",
+        help="Concurrent batch size (default: PDF_OCR_BATCH_SIZE or 6).",
     )
     parser.add_argument(
         "--prompt-file",
@@ -944,8 +947,17 @@ def main():
         f"Active OCR profile: {current['name']} "
         f"(model={current['model']}, base_url={current['base_url']})"
     )
-    print("Mode: serial only; no auto profile switch. Temporary 503/quota errors fail immediately.")
-    args.batch_size = 1
+    print("Mode: single profile only; no auto profile switch. Temporary 503/quota errors fail immediately.")
+    if args.batch_size is None:
+        raw_batch = _env("PDF_OCR_BATCH_SIZE")
+        try:
+            args.batch_size = int(raw_batch) if raw_batch else 6
+        except ValueError:
+            print(
+                f"Invalid PDF_OCR_BATCH_SIZE={raw_batch!r}; falling back to 6."
+            )
+            args.batch_size = 6
+    args.batch_size = max(1, int(args.batch_size))
 
     base_dir = args.base_dir
     if args.base_dir_from:

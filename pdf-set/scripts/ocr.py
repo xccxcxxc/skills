@@ -36,34 +36,37 @@ def _load_secrets_or_exit(path):
     return content
 
 
+# Prefer environment variables so credentials never need to be stored in this skill.
+# The legacy secrets_openai.txt remains supported for compatibility.
 secrets_path = os.path.join(ASSETS_DIR, "secrets_openai.txt")
-secrets_text = _load_secrets_or_exit(secrets_path)
+secrets_text = _load_secrets_text(secrets_path)
 
-BASE_URL = _extract_secret(
+BASE_URL = os.environ.get("PDF_OCR_BASE_URL", "").strip() or _extract_secret(
     [
         r"base_url\s*[:=]\s*['\"]([^'\"]+)['\"]",
         r"['\"]base_url['\"]\s*[:=]\s*['\"]([^'\"]+)['\"]",
     ],
     secrets_text,
 )
-API_KEY = _extract_secret(
+API_KEY = os.environ.get("PDF_OCR_API_KEY", "").strip() or _extract_secret(
     [
         r"api_key\s*=\s*['\"]([^'\"]+)['\"]",
         r"api_key\s*:\s*['\"]([^'\"]+)['\"]",
     ],
     secrets_text,
 )
-MODEL = _extract_secret(
+MODEL = os.environ.get("PDF_OCR_MODEL", "").strip() or _extract_secret(
     [
         r"model\s*[:=]\s*['\"]([^'\"]+)['\"]",
         r"['\"]model['\"]\s*[:=]\s*['\"]([^'\"]+)['\"]",
     ],
     secrets_text,
 )
-FALLBACK_MODEL = "claude-sonnet-4-6"
+# Avoid silently sending requests to an unrelated model when a provider flags a page.
+FALLBACK_MODEL = MODEL
 
 if not BASE_URL or not API_KEY or not MODEL:
-    print("secrets_openai.txt missing required values: base_url, api_key, or model.")
+    print("Missing OCR configuration. Set PDF_OCR_BASE_URL, PDF_OCR_API_KEY, and PDF_OCR_MODEL, or use secrets_openai.txt.")
     sys.exit(1)
 
 client = OpenAI(

@@ -18,25 +18,34 @@ CRITICAL: 按顺序执行以下阶段，勿跳步。
 
 ## 阶段 2：默认导出命令
 
-默认使用 `--webtex`，因为它能直接支持文档中的 `\cancel{...}`，并把公式预渲染为 SVG/SVGZ 资源打包进 EPUB。不要把 `\cancel` 改写成 `\not`。
+导出前必须确认已按 `references/排版成书.md` 的“原书插图处理”规则处理全部 `🀄️页码.jpg` 占位符：重要的封面、封底、书影、图版和正文配图使用 `assets/` 中的实际图片嵌入；纯目录页、章节装饰页与空白页的占位符必须删除。封面图若已通过 `--epub-cover-image` 声明为 EPUB 封面，不应再在 Markdown 前置页重复嵌入同一张封面图片；前置内容保留一个一级标题（书名），其下以二级标题组织书名作者、图书在版编目等信息。然后使用 `pandoc` 直接导出。
 
 ```bash
 pandoc "书籍目录/书籍名(对照翻译).md" \
   --from markdown+tex_math_dollars+tex_math_single_backslash \
   --to epub3 \
   --css "skills/pdf-set/assets/上标.css" \
+  --epub-cover-image "书籍目录/assets/cover.jpg" \
   --webtex="https://latex.codecogs.com/svg.image?" \
-  --split-level=6 \
+  --split-level=1 \
+  --toc-depth=1 \
   --resource-path "书籍目录:." \
   --metadata title="书籍名(对照翻译)" \
   --output "书籍目录/书籍名(对照翻译).epub"
+
+python3 skills/pdf-set/scripts/rename_epub_chapters.py \
+  "书籍目录/书籍名(对照翻译).epub" \
+  "书籍目录/书籍名(对照翻译).named.epub"
 ```
 
 参数要求：
 - `+tex_math_dollars`：识别 `$...$` 和 `$$...$$` 公式。
 - `+tex_math_single_backslash`：识别 `\(...\)` 公式。
 - `--webtex="https://latex.codecogs.com/svg.image?"`：直接渲染 `\cancel` 等 Pandoc MathML 不支持的宏。
-- `--split-level=6`：识别并按 1-6 级 Markdown 标题建立 EPUB 分割结构。
+- `--epub-cover-image`：指向从原书封面复制到 `assets/cover.jpg` 的图片，使阅读器书架显示正确封面。
+- `--split-level=1`：仅按一级 Markdown 标题切分 EPUB 内容文件；不要按所有子标题拆成大量 `chxxx.xhtml`。
+- `--toc-depth=1`：目录只列出一级章节（序言、正文篇章、附录）；OCR 误识别的子标题或长段落不得进入目录。
+- `rename_epub_chapters.py`：Pandoc 导出后执行；它把 `ch001.xhtml` 等通用文件名和 `nav.xhtml`、`toc.ncx`、`content.opf` 中的引用统一改为安全的章节标题。
 - `--resource-path "书籍目录:."`：让 Markdown 中的 `./assets/...` 能从书籍目录解析并打包。
 - `--css "skills/pdf-set/assets/上标.css"`：加入上标样式。
 

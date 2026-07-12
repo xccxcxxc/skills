@@ -14,12 +14,98 @@ CRITICAL:
 ## 脚本参考
 
 - 使用 `scripts/ocr.py` 完成 OCR。
-- OCR 统一使用 OpenAI Python 库及 `assets/secrets_openai.txt` 配置。
+- OCR 统一使用 OpenAI Python 库。
+- **优先**用环境变量配置；`assets/secrets_openai.txt` 仅作兼容回退，且**不要**把真实密钥提交到 Git。
 - 默认按当前工作目录推导路径：
   - 输入：`<当前目录>/images/`
   - 输出：`<当前目录>/ocr-result/`
   - Prompt：`<skill-dir>/assets/ocr_prompt.md`
-  - 密钥配置：`<skill-dir>/assets/secrets_openai.txt`，需包含 `base_url`、`api_key`、`model`
+
+### 多模型 / 多账号配置（推荐）
+
+可同时配置多组 OCR 后端。某一组额度耗尽、返回 429/503 等临时错误时，脚本会**自动切换**到下一组继续。
+
+#### 方式 A：环境变量（Minis / OpenClaw 推荐）
+
+1. 声明 profile 列表：
+
+```bash
+PDF_OCR_PROFILES=primary,backup
+```
+
+2. 为每组配置三元组：
+
+```bash
+PDF_OCR_PRIMARY_BASE_URL=https://provider-a.example/v1
+PDF_OCR_PRIMARY_API_KEY=...
+PDF_OCR_PRIMARY_MODEL=vision-model-a
+
+PDF_OCR_BACKUP_BASE_URL=https://provider-b.example/v1
+PDF_OCR_BACKUP_API_KEY=...
+PDF_OCR_BACKUP_MODEL=vision-model-b
+```
+
+3. 可选：指定启动时优先使用的 profile
+
+```bash
+PDF_OCR_PROFILE=backup
+# 或命令行：
+python scripts/ocr.py --profile backup --base-dir "书籍目录"
+```
+
+#### 方式 B：兼容旧的单组环境变量
+
+若不需要多组，仍可继续用：
+
+```bash
+PDF_OCR_BASE_URL=...
+PDF_OCR_API_KEY=...
+PDF_OCR_MODEL=...
+```
+
+#### 方式 C：secrets 分段（可选，本地调试）
+
+`assets/secrets_openai.txt` 支持：
+
+```text
+profiles = primary,backup
+
+[primary]
+base_url = "https://provider-a.example/v1"
+api_key = "..."
+model = "vision-model-a"
+
+[backup]
+base_url = "https://provider-b.example/v1"
+api_key = "..."
+model = "vision-model-b"
+```
+
+也兼容旧的单组格式：
+
+```text
+base_url = "..."
+api_key = "..."
+model = "..."
+```
+
+### 自动切换规则
+
+遇到以下情况会把当前 profile 标记为不可用并切到下一组：
+
+- HTTP `402 / 403 / 408 / 429 / 500 / 502 / 503 / 504`
+- 错误信息包含 `quota` / `rate limit` / `overloaded` / `temporarily unavailable` 等
+
+所有 profile 都不可用时任务退出；已完成页面保留在 `ocr-result/`，下次可断点续跑。
+
+### 查看已配置 profile（不输出密钥）
+
+```bash
+python .agent/skills/pdf-set/scripts/ocr.py --list-profiles
+```
+
+### 路径与批处理参数
+
 - 可选参数：
   - `--base-dir` 指定书籍目录
   - `--book-name` 指定书籍名（自动定位到 `<base-dir>/<书籍名>`）
@@ -31,6 +117,8 @@ CRITICAL:
   - `--end` 指定结束序号（含）
   - `--batch-size` 指定并发批次大小
   - `--prompt-file` 指定 prompt 文件路径
+  - `--profile` 指定起始 OCR profile
+  - `--list-profiles` 列出可用 profile 后退出
   - `--base-dir-from` 使用 UTF-8 文本文件提供书籍目录（首个非空行）
   - `--input-dir-from` 使用 UTF-8 文本文件提供输入目录（首个非空行）
   - `--input-file-from` 使用 UTF-8 文本文件提供单张图片路径（首个非空行）
@@ -42,6 +130,12 @@ CRITICAL:
 
 ```bash
 python .agent/skills/pdf-set/scripts/ocr.py --base-dir "C:\path\to" --book-name "某书" --start 0 --end 20
+```
+
+指定备用模型起步：
+
+```bash
+python .agent/skills/pdf-set/scripts/ocr.py --base-dir "C:\path\to\某书" --profile backup
 ```
 
 单文件示例：

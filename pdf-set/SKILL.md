@@ -25,5 +25,18 @@ Use the correct subtask file based on the user's request. Each subtask is a stan
 3. Follow the steps in order; do not skip CRITICAL phases.
 4. Keep outputs in the specified folders and naming formats.
 
+## OCR Multi-profile
+- OCR can use multiple model/account profiles at once.
+- Preferred env vars:
+  - `PDF_OCR_PROFILES=primary,backup`
+  - `PDF_OCR_<NAME>_BASE_URL` / `PDF_OCR_<NAME>_API_KEY` / `PDF_OCR_<NAME>_MODEL`
+  - optional `PDF_OCR_PROFILE=<name>` for the starting profile
+- Legacy single-profile env still works: `PDF_OCR_BASE_URL` / `PDF_OCR_API_KEY` / `PDF_OCR_MODEL`
+- On quota exhaustion or temporary 429/503-style errors, OCR auto-switches to the next profile.
+- Manual switch: `python scripts/ocr.py --profile backup ...`
+- List profiles (no secrets): `python scripts/ocr.py --list-profiles`
+- Details: `references/OCR.md`
+
 ## Notes
 - Do not add extra guidance beyond the selected subtask.
+- Never commit API keys; configure them via env vars or ignored local files only.

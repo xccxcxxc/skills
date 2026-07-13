@@ -1,89 +1,117 @@
 # 导出 EPUB
 
-CRITICAL: 按顺序执行以下阶段，勿跳步。
+CRITICAL:
+- 导出前必须完成标题分类与排版成书。
+- **必须把 EPUB 发回用户**。
+- 发送前必须做质量检查：目录、封面、内容文件数。
 
 ## 输入/输出
-- 输入：书籍目录中的最终 Markdown 文件，通常是 `书籍名.md` 或 `书籍名(对照翻译).md`。
-- 输出：同目录下同名 `.epub` 文件。
-- CSS：必须加入 `assets/上标.css`，用于上标渲染。
-
-## 脚本参考
-
-使用 `pandoc` 直接导出。
+- 输入：`<书名>.md`，可选 `assets/cover.jpg`
+- 输出：`<书名>.epub`
 
 ## 阶段 1：确认目标文件
-1. 若用户指定文件，使用该 Markdown 文件。
-2. 若用户未指定，优先选择书籍目录中的 `书籍名(对照翻译).md`；不存在时选择 `书籍名.md`。
-3. 输出文件与输入文件同名，仅扩展名改为 `.epub`。
+1. 确认最终 Markdown 存在。
+2. 统计 H1：`grep -E '^# ' 书名.md`
+3. H1 数量应等于“期望进入目录的导航项”数量。
 
 ## 阶段 2：默认导出命令
-
-导出前必须确认已按 `references/排版成书.md` 的“原书插图处理”规则处理全部 `🀄️页码.jpg` 占位符：重要的封面、封底、书影、图版和正文配图使用 `assets/` 中的实际图片嵌入；纯目录页、章节装饰页与空白页的占位符必须删除。封面图若已通过 `--epub-cover-image` 声明为 EPUB 封面，不应再在 Markdown 前置页重复嵌入同一张封面图片；前置内容保留一个一级标题（书名），其下以二级标题组织书名作者、图书在版编目等信息。然后使用 `pandoc` 直接导出。
+导出前必须确认：
+1. 全部 `🀄️页码.jpg` 已按插图规则处理。
+2. **封面只通过 `--epub-cover-image` 提供一次**；Markdown 前置页不要重复嵌入同一封面。
+3. 所有应进目录的章节是一级标题 `# `。
 
 ```bash
-pandoc "书籍目录/书籍名(对照翻译).md" \
+pandoc "书籍目录/书名.md" \
   --from markdown+tex_math_dollars+tex_math_single_backslash \
   --to epub3 \
-  --css "skills/pdf-set/assets/上标.css" \
+  --css "path/to/上标.css" \
   --epub-cover-image "书籍目录/assets/cover.jpg" \
   --webtex="https://latex.codecogs.com/svg.image?" \
   --split-level=1 \
   --toc-depth=1 \
   --resource-path "书籍目录:." \
-  --metadata title="书籍名(对照翻译)" \
-  --output "书籍目录/书籍名(对照翻译).epub"
+  --metadata title="书名" \
+  --metadata author="作者" \
+  --output "书籍目录/书名.epub"
 
-python3 skills/pdf-set/scripts/rename_epub_chapters.py \
-  "书籍目录/书籍名(对照翻译).epub" \
-  "书籍目录/书籍名(对照翻译).named.epub"
+python scripts/rename_epub_chapters.py \
+  "书籍目录/书名.epub" \
+  "书籍目录/书名.named.epub"
 ```
 
-参数要求：
-- `+tex_math_dollars`：识别 `$...$` 和 `$$...$$` 公式。
-- `+tex_math_single_backslash`：识别 `\(...\)` 公式。
-- `--webtex="https://latex.codecogs.com/svg.image?"`：直接渲染 `\cancel` 等 Pandoc MathML 不支持的宏。
-- `--epub-cover-image`：指向从原书封面复制到 `assets/cover.jpg` 的图片，使阅读器书架显示正确封面。
-- `--split-level=1`：仅按一级 Markdown 标题切分 EPUB 内容文件；不要按所有子标题拆成大量 `chxxx.xhtml`。
-- `--toc-depth=1`：目录只列出一级章节（序言、正文篇章、附录）；OCR 误识别的子标题或长段落不得进入目录。
-- `rename_epub_chapters.py`：Pandoc 导出后执行；它把 `ch001.xhtml` 等通用文件名和 `nav.xhtml`、`toc.ncx`、`content.opf` 中的引用统一改为安全的章节标题。
-- `--resource-path "书籍目录:."`：让 Markdown 中的 `./assets/...` 能从书籍目录解析并打包。
-- `--css "skills/pdf-set/assets/上标.css"`：加入上标样式。
+参数说明：
+- `--epub-cover-image`：书架封面；只设这一次。
+- `--split-level=1`：按一级标题切分内容文件。
+- `--toc-depth=1`：目录只收一级标题。
+- 因此 **想进目录的标题必须是 H1**。
 
-## 阶段 3：不要优先使用的方案
+## 阶段 3：质量检查（发送前必做）
 
-不要优先使用 `--mathjax`：
-- 很多 EPUB 阅读器不会执行 MathJax JavaScript，公式可能显示为源码。
+### 1) 目录是否完整
+- 打开 `EPUB/nav.xhtml` / `toc.ncx`。
+- TOC 条目数应 ≈ Markdown H1 数。
+- 失败信号：TOC 只有书名 1 项，而正文其实有几十章。
+- 根因通常是：章节被标成 `##`，但导出用了 `--toc-depth=1`。
+- 修复：回到 `标题分类`，把导航章节升为 `# ` 后重导。
 
-不要优先使用 `--mathml`：
-- Pandoc 的 MathML 转换器不支持 `\cancel{...}`，会警告并残留 TeX 文本。
-- 只有在文档没有 `\cancel` 等不支持宏，且用户明确要求 MathML 时才使用。
+### 2) 封面是否只出现一次
+- OPF 中有且仅有一个 `cover-image` / `--epub-cover-image`。
+- 正文各 `ch*.xhtml` **不应再出现封面图**。
+- 失败信号：阅读器首页封面后又在正文开头再嵌同一张或版权整页图。
+- 修复：删除 Markdown 中的封面/重复前置图，只保留 `assets/cover.jpg` 给 pandoc。
 
-## 阶段 4：输出检查
-1. EPUB 文件存在且大小合理。
-2. 检查 EPUB 内部已打包 CSS。
-3. 若文档含图片，检查 `EPUB/media/` 中已打包图片资源。
-4. 若文档含公式，检查 `EPUB/media/` 中存在 `.svg` 或 `.svgz` 公式资源。
-5. 若文档含 `\cancel`，检查 EPUB 的 XHTML 中存在类似 `alt="\cancel{A}"` 的公式图片引用。
+### 3) “三章节 / 文件过少”异常
+用户说“只有三章节”时，优先检查 spine，而不是只看正文标题：
+- 常见错误 spine：
+  1. `cover.xhtml`
+  2. `title_page.xhtml`
+  3. `ch001.xhtml`（整本书挤在一个内容文件）
+- 这不是“只有三章正文”，而是 **导航/内容文件只切出 3 个入口**。
+- 根因：
+  - 只有 1 个 H1（书名），其余章节是 H2；
+  - 或 `--split-level=1` 下没有足够 H1 可切分。
+- 修复后期望：
+  - `cover.xhtml` + `title_page.xhtml` + 多个 `chXXX.xhtml`；
+  - TOC 列出全部导航章节。
 
-检查示例：
-
+### 4) 快速自检命令
 ```bash
-python3 - <<'PY'
+python - <<'PY'
 from zipfile import ZipFile
-p = "书籍目录/书籍名(对照翻译).epub"
+import re
+p='书名.epub'
 with ZipFile(p) as z:
-    names = z.namelist()
-    media = [n for n in names if n.startswith("EPUB/media/")]
-    css = [n for n in names if n.endswith(".css")]
-    formulas = [n for n in media if n.endswith((".svg", ".svgz"))]
-    xhtml = "\n".join(
-        z.read(n).decode("utf-8", "ignore")
-        for n in names
-        if n.endswith((".xhtml", ".html"))
-    )
-    print("css", css)
-    print("media", len(media))
-    print("formula_svg", len(formulas))
-    print("contains_cancel_alt", "\\cancel" in xhtml)
+  nav=z.read('EPUB/nav.xhtml').decode('utf-8','ignore')
+  links=re.findall(r'<a href="text/[^"]+">([^<]+)</a>', nav)
+  print('toc', len(links), links[:10], '...' if len(links)>10 else '')
+  texts=[n for n in z.namelist() if n.startswith('EPUB/text/') and n.endswith('.xhtml')]
+  print('text_files', sorted(texts))
+  for n in sorted(texts):
+    if n.endswith(('cover.xhtml','title_page.xhtml')): continue
+    data=z.read(n).decode('utf-8','ignore')
+    imgs=re.findall(r'<img[^>]+src="([^"]+)"', data)
+    if imgs: print('body_images', n, imgs)
+print('zip', ZipFile(p).testzip())
 PY
 ```
+
+通过标准：
+1. TOC 含全部应导航章节；
+2. 正文不再重复封面；
+3. 内容文件数与 H1 数匹配，而不是只有 cover/title/单 ch001 三件套。
+
+## 阶段 4：发送
+1. 当前聊天附件 / `MEDIA:<epub>`
+2. Telegram Bot API `sendDocument`
+3. MTProto 大文件脚本
+4. 都失败则给本地绝对路径
+
+minis 环境额外：`android-notification` 提示完成。
+
+## 阶段 5：常见失败复盘（写进执行习惯）
+| 现象 | 根因 | 处理 |
+|---|---|---|
+| 目录只有书名 | 章节是 `##`，`--toc-depth=1` 不收录 | 章节升为 `# ` 后重导 |
+| 封面出现两次 | `--epub-cover-image` + 正文又嵌封面/版权图 | 正文去封面图，只留 cover image |
+| 看起来像“三章节” | spine 只有 cover/title/整书 ch001 | 增加导航 H1，让 split-level=1 切出多章 |
+| 目录有章但阅读器仍怪 | 未跑 `rename_epub_chapters.py` 或 nav/opf 不一致 | 重跑 rename 与 nav 检查 |

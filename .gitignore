@@ -1,4 +1,16 @@
+# local secrets
 pdf-set/assets/secrets_openai.txt
 pdf-set/assets/*.local.*
 pdf-set/assets/*.key
+**/secrets_openai.txt
 .agents/
+
+# local runtime only (not part of upstream skill tree)
+.venv/
+.tools/
+
+# top-level OpenClaw discovery mirrors; git-tracked content lives under pdf-set/
+/SKILL.md
+/assets/
+/references/
+/scripts/

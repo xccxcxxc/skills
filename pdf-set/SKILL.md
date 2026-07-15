@@ -1,6 +1,6 @@
 ---
 name: "pdf-set"
-description: "PDF OCR/排版/EPUB；兼容 minis/Linux，含目录与封面质量坑"
+description: "PDF OCR/排版/EPUB；兼容 minis/Linux，含验收前保留中间产物与目录封面质量坑"
 ---
 
 # pdf-set
@@ -36,6 +36,21 @@ Use the correct subtask file based on the user's request. Each subtask is a stan
    - support **minis** paths/tools and **Linux/OpenClaw** paths/tools;
    - do not hardcode a single host path, single scheduler, or single notification channel.
 7. Before sending any EPUB, run the quality checks in `references/导出EPUB.md` (TOC / cover / spine). Do not ship a known-bad EPUB.
+8. For PDF→EPUB conversion or EPUB export, always enforce the EPUB Acceptance Gate below in addition to the selected subtask.
+
+## EPUB Acceptance Gate
+
+Generating, validating, or sending an EPUB does not complete the task's cleanup phase. The EPUB remains pending acceptance until the user explicitly confirms that the delivered file is correct or explicitly authorizes cleanup.
+
+Before acceptance:
+- Keep the original PDF or Markdown source, split page images, OCR outputs, rough merge, heading-classified and typeset Markdown, image assets, original and renamed EPUB files, backups, and the complete work directory.
+- Do not delete, overwrite, compact away, or move acceptance-critical intermediates into an automatically cleaned temporary location.
+- If the workflow started under `/tmp` or another ephemeral path, preserve the complete work directory in a durable acceptance-hold location before delivery.
+- Reuse the retained work directory for corrections; do not reconstruct from the delivered EPUB when retained sources are available.
+- Report the retained work-directory path when delivering the EPUB.
+- If storage pressure is a concern, ask the user before deleting anything.
+
+Cleanup is allowed only after the user explicitly confirms the EPUB is correct or explicitly asks to remove the retained files. Then remove task-only intermediates and report what was cleaned.
 
 ## OCR Profiles
 - You may store multiple named model/account profiles, but OCR always runs **one profile at a time**.
@@ -52,7 +67,7 @@ Use the correct subtask file based on the user's request. Each subtask is a stan
 - Details: `references/OCR.md`
 
 ## Notes
-- Do not add extra guidance beyond the selected subtask.
+- Do not add extra guidance beyond the selected subtask, except for the mandatory EPUB Acceptance Gate.
 - Never commit API keys; configure them via env vars or ignored local files only.
 - Prefer a local venv / skill-local python when system packages are PEP-668 protected; otherwise use the environment's normal Python.
 - Prefer `pandoc` from PATH; if only a skill-local wrapper exists, use that.

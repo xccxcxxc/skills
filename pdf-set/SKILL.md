@@ -28,9 +28,9 @@ Use the correct subtask file based on the user's request. Each subtask is a stan
 4. Keep outputs in the specified folders and naming formats.
 5. **Whenever a full-book OCR conversion starts**, also follow `references/OCR进度检查.md`:
    - estimate completion time;
-   - create a once follow-up check job using the **scheduler available in the current environment**;
-   - on completion continue merge → heading classify → typeset → EPUB;
-   - **deliver the EPUB back to the user** (required);
+   - create **exactly one** once follow-up at the **estimated completion time** (optional ~10–15% buffer; never stack many checks);
+   - when due: if unfinished, re-estimate and schedule the **next** single ETA once (do not clear ETA checks without creating the next);
+   - if finished: continue merge → heading classify → typeset → EPUB, **deliver the EPUB** (required), then delete remaining related once tasks;
    - never leak API keys in replies or job prompts.
 6. This skill must stay portable for GitHub:
    - support **minis** paths/tools and **Linux/OpenClaw** paths/tools;
@@ -60,7 +60,7 @@ Cleanup is allowed only after the user explicitly confirms the EPUB is correct o
   - `PDF_OCR_PROFILE=<name>` selects the only profile used for this run
 - Legacy single-profile env still works: `PDF_OCR_BASE_URL` / `PDF_OCR_API_KEY` / `PDF_OCR_MODEL`
 - OCR uses a single profile only. No auto profile switch.
-- Concurrency is configurable via `PDF_OCR_BATCH_SIZE` (default 6). CLI `--batch-size` overrides the env var.
+- Pages run **sequentially** so continued tables can inherit the previous page header (`--batch-size` kept for CLI compat, no longer parallelizes).
 - On 503 / quota / temporary provider errors: fail immediately and exit.
 - Manual switch for the next run: change `PDF_OCR_PROFILE` or pass `--profile backup`
 - List profiles (no secrets): `python scripts/ocr.py --list-profiles`
@@ -71,3 +71,10 @@ Cleanup is allowed only after the user explicitly confirms the EPUB is correct o
 - Never commit API keys; configure them via env vars or ignored local files only.
 - Prefer a local venv / skill-local python when system packages are PEP-668 protected; otherwise use the environment's normal Python.
 - Prefer `pandoc` from PATH; if only a skill-local wrapper exists, use that.
+
+## Table OCR (mixed pages)
+- Mixed text+table pages must stay text (no whole-page 🀄️) when rows/columns are readable.
+- Single-level / narrative tables (e.g. name-track lists) → GFM pipe tables; do **not** use `table-dense`.
+- Multi-level / dense stat tables → HTML `<table>` with `rowspan`/`colspan`, wrap in `div.table-wrap`, class `table-dense` (nowrap + slightly smaller font; horizontal scroll OK).
+- No footnotes inside cells; continuation pages reuse prior header (ocr.py injects last table header; pages run sequentially).
+- CSS: `assets/上标.css` — narrative tables readable; dense tables compact. Details: `references/OCR.md`, `导出EPUB.md`.

@@ -43,12 +43,21 @@ CRITICAL:
 - OCR profile：当前 `PDF_OCR_PROFILE`（只写名称，不写 key）
 - 目标会话：当前用户会话 / 用户指定 session
 
+## 定时任务数量与生命周期（强制）
+- **一次只保留 1 个** 与本书相关的 once 进度检查：时间 = **预估完成时刻**（可加约 10–15% 缓冲；不少于 5 分钟后）。
+- **禁止**开跑时一次创建多个检查（如每 30 分钟一串）。
+- **禁止**在未完成时把“更晚的预估完成”检查直接删光且不再创建下一次。
+- 到点检查结果分支：
+  1. **已完成（OCR 满页且后续流水线也做完）** → 删除本书相关、尚未执行的 once 任务，再回复/回传 EPUB。
+  2. **未完成** → 按最新 mtime 重算 ETA，**创建下一个** once（label 可带 `HH:MM`）；可删已过期/已触发的，但必须留下合理的下一次 ETA。
+- 整条流水线（OCR→合并→标题→排版→EPUB）全部成功后，再 `list` 并清理本书剩余 once。
+
 ## 阶段 A：开始全量 OCR 时（必做）
 1. 确认书目录、`images/`、`total`、profile、日志路径。
 2. 启动 / 确认 OCR 后台进程。
 3. 预估完成时间；`eta` 不少于 5 分钟。
 4. 当前会话简短回报进度与 ETA。
-5. 创建 once follow-up 检查任务。
+5. **只创建 1 个** once follow-up，时间设在预估完成时刻（可缓冲），不要一次建多个。
 
 ## 阶段 B：到点检查（严格执行）
 检查提示模板：
@@ -58,11 +67,12 @@ CRITICAL:
 
 请严格按下面做：
 1. 统计 ocr-result 中已完成页数 completed/<TOTAL>，并检查 ocr.py 进程是否仍在运行。
-2. 若 completed>=<TOTAL> 且进程已结束：明确回复“OCR已完成”，并继续执行粗合并、标题整理、排版成书、导出EPUB（参考 pdf-set skill）。完成后把 EPUB 发回用户；若 android-notification 可用则再发一条通知。
+2. 若 completed>=<TOTAL> 且进程已结束：明确回复“OCR已完成”，并继续执行粗合并、标题整理、排版成书、导出EPUB（参考 pdf-set skill）。完成后把 EPUB 发回用户；若 android-notification 可用则再发一条通知。然后删除本书相关、尚未执行的 once 定时任务。
 3. 若未完成：
    - 基于最近完成页面的 mtime 估算剩余时间；
    - 在本会话回复当前进度、速度、预计完成时间；
-   - 再创建一个 once follow-up 到本会话，时间设为预计完成时刻或至少 5 分钟后，label 仍用“书名OCR进度检查”，prompt 复用本指令，实现递归检查；
+   - 再创建 **1 个** once follow-up 到本会话，时间设为 **预计完成时刻**（可加约 10–15% 缓冲，或至少 5 分钟后），label 如“书名进度HH:MM”，prompt 复用本指令，实现递归检查；
+   - 不要一次创建多个检查；不要只删任务而不排下一次 ETA；
    - 若进程已停止且未完成，分析日志错误，尝试按当前 PDF_OCR_PROFILE 断点续跑，再重新估时并安排下一次检查。
 4. 简洁回复，不要泄露任何 API key。
 ```
@@ -72,15 +82,17 @@ CRITICAL:
 2. 依次：粗合并 → 标题分类 → 排版成书 → 导出 EPUB。
 3. **必须把最终 EPUB 发回用户**。
 4. 导出前/发送前执行 `references/导出EPUB.md` 质量检查。
-5. 不要再创建进度检查任务。
+5. **删除**本书相关、尚未执行的 once 进度检查；不要再创建进度检查任务。
 
 ### B3/B4 未完成
-- 进程在跑：估速、回报、再排 once。
+- 进程在跑：估速、回报、再排 **1 个** ETA once。
 - 进程已停：读日志、按当前 profile 断点续跑；额度/503/认证错误不要死循环。
+- 无论哪种：未完成就不能只清空任务；必须留下下一次预估完成检查。
 
 ## 定时任务实现
 ### minis
 - `minis-scheduled` once follow-up + `android-notification`
+- 创建前可 `list`；同书多条 once 时只保留最新 ETA，删掉多余堆叠（但删完后若仍未完成必须立刻再建 1 个 ETA）。
 ### Linux/OpenClaw
 - `cron` `at` + `agentTurn` + `sessionTarget=current` + `deleteAfterRun=true`
 

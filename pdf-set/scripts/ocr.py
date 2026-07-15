@@ -617,7 +617,113 @@ def _cooldown_seconds_for_error(exc):
     return 30
 
 
-def extract_text_from_openai_api(image_path, page_num, prompt_text):
+def _extract_last_table_header_block(md_text, max_chars=2500):
+    """Return last table header (GFM or HTML thead) from prior page OCR."""
+    if not md_text:
+        return ""
+    text = md_text
+    # Prefer last HTML table header (multi-level)
+    html_matches = list(
+        re.finditer(
+            r"(?is)(?:<div\b[^>]*table-wrap[^>]*>\s*)?<table\b[^>]*>\s*"
+            r"(?:<thead\b[^>]*>.*?</thead>|(?:<tr\b[^>]*>.*?</tr>\s*){1,3})",
+            text,
+        )
+    )
+    if html_matches:
+        m = html_matches[-1]
+        block = m.group(0).strip()
+        # Prefer only thead if present for cleaner continuation prompt
+        thead = re.search(r"(?is)<thead\b[^>]*>.*?</thead>", block)
+        if thead:
+            # include opening table tag attributes when possible
+            open_tag = re.search(r"(?is)<table\b[^>]*>", block)
+            wrap = re.search(r"(?is)<div\b[^>]*table-wrap[^>]*>", m.group(0))
+            parts = []
+            if wrap:
+                parts.append(wrap.group(0))
+            if open_tag:
+                parts.append(open_tag.group(0))
+            parts.append(thead.group(0))
+            block = "\n".join(parts)
+        if len(block) > max_chars:
+            block = block[:max_chars]
+        return block
+
+    lines = text.splitlines()
+    # Find last separator line of a pipe table
+    sep_idx = None
+    for i in range(len(lines) - 1, -1, -1):
+        s = lines[i].strip()
+        if s.startswith("|") and re.search(r"-{3,}", s) and s.count("|") >= 2:
+            sep_idx = i
+            break
+    if sep_idx is None or sep_idx == 0:
+        return ""
+    header_idx = sep_idx - 1
+    if not lines[header_idx].strip().startswith("|"):
+        return ""
+    # Optional table title in the 1-2 non-empty lines above header
+    title_parts = []
+    j = header_idx - 1
+    skipped_blank = 0
+    while j >= 0 and len(title_parts) < 2:
+        s = lines[j].strip()
+        if not s:
+            skipped_blank += 1
+            if skipped_blank > 1:
+                break
+            j -= 1
+            continue
+        if s.startswith("|") or s.startswith("#"):
+            break
+        if s.startswith("<sup>") or s.startswith("资料来源"):
+            break
+        title_parts.insert(0, lines[j].rstrip())
+        j -= 1
+        break  # only one title line
+    block_lines = title_parts + [lines[header_idx].rstrip(), lines[sep_idx].rstrip()]
+    block = "\n".join(block_lines).strip()
+    if len(block) > max_chars:
+        block = block[-max_chars:]
+    return block
+
+
+def _prior_page_table_context(image_path, output_dir):
+    """If previous numeric page OCR exists, extract its last table header for continuation."""
+    base = os.path.splitext(os.path.basename(image_path))[0]
+    if not base.isdigit() or not output_dir:
+        return ""
+    prev = int(base) - 1
+    prev_path = os.path.join(output_dir, f"{prev}.md")
+    if not os.path.isfile(prev_path):
+        return ""
+    try:
+        with open(prev_path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return ""
+    return _extract_last_table_header_block(text)
+
+
+def _compose_page_prompt(prompt_text, image_filename, table_context=""):
+    parts = [prompt_text, f"文件名：{image_filename}"]
+    if table_context:
+        parts.append(
+            "【上页表格结构参考——仅当本页是同一表格的续页时使用】\n"
+            "若本页开头继续上页未结束的表格：\n"
+            "- 若参考是 GFM：使用完全相同的表头行与分隔行（列名、列序、列数一致）；\n"
+            "- 若参考是 HTML：复制相同的 <table> 开标签与 <thead>…</thead>（rowspan/colspan 一致），"
+            "再只写本页新数据的 <tbody> 行；\n"
+            "只输出本页新出现的数据行；不要重复上页已有数据行；不要输出空表头；"
+            "单元格内禁止换行。\n"
+            "若本页是新表或与上表无关的正文，忽略本参考。\n"
+            f"{table_context}"
+        )
+    return parts
+
+
+def extract_text_from_openai_api(image_path, page_num, prompt_text, table_context=""):
     """
     Send one image to the configured OCR profile only.
     No auto-switch. On 503 / temporary provider errors, raise immediately.
@@ -634,23 +740,47 @@ def extract_text_from_openai_api(image_path, page_num, prompt_text):
             image_filename = os.path.basename(image_path)
             mime_type = _guess_mime_type(image_path)
             image_b64 = base64.b64encode(image_bytes).decode("ascii")
+            content_parts = [
+                {"type": "text", "text": p}
+                for p in _compose_page_prompt(prompt_text, image_filename, table_context)
+            ]
+            content_parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
+                }
+            )
             messages = [
                 {
                     "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt_text},
-                        {"type": "text", "text": f"文件名：{image_filename}"},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
-                        },
-                    ],
+                    "content": content_parts,
                 }
             ]
-            response = client.chat.completions.create(
-                model=selected_model,
-                messages=messages,
-            )
+            # Dense mixed pages (tables + prose) need enough completion budget;
+            # without max_tokens some gateways default low and cut mid-table.
+            create_kwargs = {
+                "model": selected_model,
+                "messages": messages,
+                "max_tokens": 8192,
+            }
+            try:
+                response = client.chat.completions.create(**create_kwargs)
+            except Exception as token_err:
+                # Some models only accept max_completion_tokens
+                msg = str(token_err).lower()
+                if "max_tokens" in msg or "max_completion_tokens" in msg:
+                    create_kwargs.pop("max_tokens", None)
+                    create_kwargs["max_completion_tokens"] = 8192
+                    try:
+                        response = client.chat.completions.create(**create_kwargs)
+                    except Exception:
+                        create_kwargs.pop("max_completion_tokens", None)
+                        response = client.chat.completions.create(
+                            model=selected_model,
+                            messages=messages,
+                        )
+                else:
+                    raise
 
             finish_reason = _get_finish_reason(response)
             if finish_reason and "CONTENT_FILTER" in finish_reason.upper():
@@ -731,47 +861,59 @@ def process_images(images_dir, output_dir, prompt_text, start_idx=None, end_idx=
 
     total = len(image_files)
     fail_count = 0
-    fail_lock = Lock()
 
     def _process_one(image_path, idx):
         nonlocal fail_count
-        text = extract_text_from_openai_api(image_path, idx, prompt_text)
         base_name = os.path.splitext(os.path.basename(image_path))[0]
-        if text == "__PROHIBITED_CONTENT__":
-            out_path = os.path.join(output_dir, f"{base_name}.fail.md")
+        out_path = os.path.join(output_dir, f"{base_name}.md")
+        # Resume: skip non-empty completed pages
+        if os.path.isfile(out_path):
             try:
-                with open(out_path, "w", encoding="utf-8") as md_file:
+                if os.path.getsize(out_path) > 0:
+                    return
+            except OSError:
+                pass
+        # Sequential page order preserves prior-page table headers for continuations.
+        table_context = _prior_page_table_context(image_path, output_dir)
+        text = extract_text_from_openai_api(
+            image_path, idx, prompt_text, table_context=table_context
+        )
+        if text == "__PROHIBITED_CONTENT__":
+            fail_path = os.path.join(output_dir, f"{base_name}.fail.md")
+            try:
+                with open(fail_path, "w", encoding="utf-8") as md_file:
                     md_file.write("")
             except Exception:
                 pass
-            with fail_lock:
-                fail_count += 1
+            fail_count += 1
             return
         if text is None:
             raise RuntimeError(f"No content after retries on page {idx}. Please intervene.")
-        out_path = os.path.join(output_dir, f"{base_name}.md")
         try:
             with open(out_path, "w", encoding="utf-8") as md_file:
                 md_file.write(text)
         except Exception:
             pass
 
+    # Process pages in index order (not concurrent batches) so continued tables can
+    # reuse the previous page's header. batch_size is retained for CLI compatibility
+    # but no longer parallelizes across pages.
+    if batch_size and int(batch_size) > 1:
+        print(
+            "Note: table-continuation mode runs pages sequentially "
+            f"(batch_size={batch_size} ignored for parallelism)."
+        )
     completed = 0
-    batch_size = max(1, int(batch_size or 1))
     items = list(enumerate(image_files, start=1))
     update_progress(0, total)
-    for i in range(0, total, batch_size):
-        batch = items[i : i + batch_size]
-        with ThreadPoolExecutor(max_workers=batch_size) as executor:
-            futures = [executor.submit(_process_one, image_path, idx) for idx, image_path in batch]
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    print(f"\n{e}")
-                    sys.exit(1)
-                completed += 1
-                update_progress(completed, total)
+    for idx, image_path in items:
+        try:
+            _process_one(image_path, idx)
+        except Exception as e:
+            print(f"\n{e}")
+            sys.exit(1)
+        completed += 1
+        update_progress(completed, total)
 
     if fail_count:
         print(f"Fail pages: {fail_count}")
@@ -792,7 +934,16 @@ def process_single_image(image_path, output_dir, output_file, prompt_text):
         base_name = os.path.splitext(os.path.basename(image_path))[0]
         out_path = os.path.join(output_dir, f"{base_name}.md")
 
-    text = extract_text_from_openai_api(image_path, 1, prompt_text)
+    # Prefer sibling ocr-result for prior-page context when output_file is custom.
+    context_dir = output_dir
+    if output_file:
+        sibling = os.path.dirname(os.path.abspath(output_file))
+        if sibling:
+            context_dir = sibling
+    table_context = _prior_page_table_context(image_path, context_dir)
+    text = extract_text_from_openai_api(
+        image_path, 1, prompt_text, table_context=table_context
+    )
     if text == "__PROHIBITED_CONTENT__":
         fail_path = os.path.join(
             output_dir, f"{os.path.splitext(os.path.basename(image_path))[0]}.fail.md"

@@ -44,6 +44,11 @@ python scripts/rename_epub_chapters.py \
 - `--split-level=1`：按一级标题切分内容文件。
 - `--toc-depth=1`：目录只收一级标题。
 - 因此 **想进目录的标题必须是 H1**。
+- CSS（`assets/上标.css`）两种表：
+  - **默认/叙述表**（如表5—6 GFM）：约 0.92rem，长文本单元格允许换行，保证可读。
+  - **密表**（`table.table-dense`，多级统计表如表5—5）：约 0.72rem，单元格 `nowrap`；外包 `.table-wrap` 可横滑。**不要**对叙述表用 scale 缩小。
+- 单层表：GFM pipe → pandoc HTML；多级表：OCR 直接输出 HTML `<table>`（rowspan/colspan）。
+- 导出 from 默认 markdown 需保留 `pipe_tables` 与 raw HTML。
 
 ## 阶段 3：质量检查（发送前必做）
 

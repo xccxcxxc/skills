@@ -11,6 +11,17 @@ CRITICAL:
 - 输出：`ocr-result/` 中的单页文件，文件名为「原图序号.md」，一一对应。
   - 单文件输出：默认写入 `ocr-result/`，文件名为「原图文件名.md」，也可指定输出文件路径。
 
+## 表格 / 混排页（重要）
+- 同一页可「正文 + 表题 + 表格 + 正文」；**不要**因有表就整页 `🀄️`。
+- **表内禁止塞注释**：表头/单元格只留可见字与注号（① 等）；脚注放表外 `<sup>【】</sup>`。
+- **单层表头 / 叙述型名单表**（如「表5—6」姓名、职务、轨迹）→ **GFM 管道表**，**不要**加 `table-dense`；长单元格允许换行，保持可读字号。
+- **多级表头 / 跨列合并 / 统计密表**（如「表5—5」）→ HTML `<table>` + `rowspan`/`colspan`，外包 `div.table-wrap`，table 加 `class="table-dense"`（单元格 `nowrap`、略缩小字号；宽表横滑，**不要 scale 缩小叙述表**）。
+- **禁止**把多级表头压扁成一行后丢失上层分组。
+- **跨页表**：起表页完整表头；续表页重复同一表头结构（GFM 或 HTML thead）再接新行；`ocr.py` 会从上页 `ocr-result` 注入末表表头。
+- **顺序处理**：为继承续表表头，批量 OCR **按页序串行**（`--batch-size` 不再并行翻页）。
+- 请求默认 `max_tokens=8192`，降低密表+长正文截断概率。
+- 旧结果不合格：删 `ocr-result/N.md` 后单页重跑。
+
 ## 脚本参考
 
 - 使用 `scripts/ocr.py` 完成 OCR。
@@ -29,7 +40,8 @@ CRITICAL:
 
 - **只用一组**：始终使用 `PDF_OCR_PROFILE` / `--profile` 指定的 profile。
 - **不自动切换**：不会在失败时改用其他 profile。
-- **默认并发 6 页**：可用 `--batch-size` 或环境变量 `PDF_OCR_BATCH_SIZE` 调整。
+- **按页顺序串行**（保证跨页表格继承上页表头）；`--batch-size` / `PDF_OCR_BATCH_SIZE` 保留兼容，但不再并行翻页。
+- 请求默认 `max_tokens=8192`（部分模型回退 `max_completion_tokens`）。
 - **503 / 额度耗尽 / 临时服务不可用**：直接报错退出。
 - 需要换模型时：手动改 `PDF_OCR_PROFILE`，或下次运行加 `--profile backup`。
 

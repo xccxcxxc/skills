@@ -3,3 +3,106 @@ sup {
   line-height: 0;
   vertical-align: super;
 }
+
+/*
+  Two table modes:
+  1) Default / GFM narrative tables (e.g. 表5—6): readable size, long text wraps.
+  2) .table-dense statistical grids (e.g. 表5—5 multi-header): nowrap + slightly smaller type.
+*/
+
+.table-wrap {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 0.55em 0;
+  /* never clip rows vertically */
+  overflow-y: visible;
+  height: auto !important;
+}
+
+/* ---------- default tables (GFM / 叙述表) ---------- */
+table {
+  border-collapse: collapse;
+  border-spacing: 0;
+  width: 100%;
+  max-width: 100%;
+  table-layout: auto;
+  margin: 0.4em 0;
+  font-size: 0.92rem; /* readable body size */
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+
+th,
+td {
+  border: 1px solid #555;
+  padding: 0.28em 0.45em;
+  vertical-align: middle;
+  text-align: left;
+  font-weight: normal;
+  /* allow wrap for long trajectory / school / title cells */
+  white-space: normal;
+  word-break: normal;
+  overflow-wrap: anywhere;
+  writing-mode: horizontal-tb;
+}
+
+th {
+  background: #f2f2f2;
+  font-weight: bold;
+  text-align: center;
+  /* short headers stay on one line when possible */
+  white-space: nowrap;
+}
+
+/* numeric-looking body cells: center */
+td {
+  text-align: center;
+}
+
+th:first-child,
+td:first-child {
+  text-align: left;
+  white-space: nowrap; /* row labels like names stay one line */
+}
+
+tr:nth-child(even) td {
+  background: #fafafa;
+}
+
+/* ---------- dense multi-header statistical tables ---------- */
+table.table-dense {
+  width: auto !important;
+  min-width: max-content;
+  max-width: none !important;
+  table-layout: auto !important;
+  font-size: 0.72rem; /* ~11.5px — readable, not microscopic */
+  line-height: 1.2;
+}
+
+table.table-dense th,
+table.table-dense td {
+  padding: 0.14em 0.28em;
+  text-align: center;
+  /* force single-line cells like the printed grid */
+  white-space: nowrap !important;
+  word-break: keep-all !important;
+  overflow-wrap: normal !important;
+  max-width: none !important;
+}
+
+table.table-dense th:first-child,
+table.table-dense td:first-child {
+  text-align: left;
+}
+
+@media screen and (max-width: 520px) {
+  table {
+    font-size: 0.86rem;
+  }
+  table.table-dense {
+    font-size: 0.64rem;
+  }
+}

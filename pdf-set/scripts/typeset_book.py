@@ -89,6 +89,35 @@ def is_halfwidth_char(ch):
     return unicodedata.east_asian_width(ch) not in ("F", "W")
 
 
+def is_md_table_line(text):
+    """Detect GFM pipe-table rows / separator rows so layout won't glue them."""
+    s = (text or "").strip()
+    if not s or s.count("|") < 1:
+        return False
+    if s.startswith("|") and s.count("|") >= 2:
+        return True
+    if re.match(r"^:?-{3,}:?(?:\s*\|\s*:?-{3,}:?)+$", s):
+        return True
+    if s.count("|") >= 2 and not re.search(r"[\u4e00-\u9fff]{8,}", s.split("|")[0]):
+        cells = [c.strip() for c in s.split("|")]
+        if all(len(c) <= 40 for c in cells if c):
+            return True
+    return False
+
+
+def is_html_table_markup_line(text):
+    s = (text or "").strip().lower()
+    if not s:
+        return False
+    return bool(
+        re.search(
+            r"</?(?:div\b|table\b|thead\b|tbody\b|tr\b|th\b|td\b)|"
+            r"class\s*=\s*[\"']table-(?:wrap|dense)",
+            s,
+        )
+    )
+
+
 def process_layout(input_path, output_path, is_index=False):
     with open(input_path, "r", encoding="utf-8") as f:
         lines = f.read().splitlines()
@@ -96,11 +125,57 @@ def process_layout(input_path, output_path, is_index=False):
     blocks = []
     current_block = ""
     prev_block_is_heading = False
+    in_pipe_table = False
+    in_html_table = False
+
+    def flush_block():
+        nonlocal current_block, prev_block_is_heading, in_pipe_table, in_html_table
+        if current_block:
+            blocks.append(current_block.rstrip())
+            prev_block_is_heading = current_block.lstrip().startswith("#")
+        current_block = ""
+        in_pipe_table = False
+        in_html_table = False
+
+    def append_raw(line):
+        nonlocal current_block
+        if current_block:
+            current_block = current_block.rstrip() + "\n" + line
+        else:
+            current_block = line
 
     for line in lines:
         stripped = line.strip()
         if not stripped:
             continue
+
+        starts_html = bool(re.search(r"<div\b[^>]*table-wrap|<table\b", stripped, re.I))
+        if in_html_table or (not in_pipe_table and (starts_html or (is_html_table_markup_line(stripped) and "<" in stripped))):
+            if not in_html_table:
+                if current_block:
+                    flush_block()
+                in_html_table = True
+            append_raw(stripped)
+            low = current_block.lower()
+            if "</table>" in low:
+                after = low.rsplit("</table>", 1)[-1]
+                if "table-wrap" in low:
+                    if "</div>" in after:
+                        flush_block()
+                elif low.rstrip().endswith("</table>"):
+                    flush_block()
+            continue
+
+        if is_md_table_line(stripped):
+            if not in_pipe_table:
+                if current_block:
+                    flush_block()
+                in_pipe_table = True
+            append_raw(stripped)
+            continue
+
+        if in_pipe_table:
+            flush_block()
 
         starts_with_two_spaces = line.startswith("  ")
         is_heading = line.startswith("#")
@@ -153,6 +228,7 @@ def process_layout(input_path, output_path, is_index=False):
     final_text = cleanup_text("\n\n".join(blocks))
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(final_text.rstrip() + "\n")
+
 
 
 def typeset_files(input_dir, output_dir, filenames):

@@ -3,19 +3,28 @@ import sys
 import time
 import re
 import base64
-from datetime import datetime
+from datetime import datetime, timezone
 import glob
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
 from openai import OpenAI
+
+from table_utils import (
+    atomic_write_json,
+    atomic_write_text,
+    natural_path_key,
+    page_is_valid,
+    page_meta_path,
+    sanitize_html_table_block,
+    sha256_file,
+    sha256_text,
+    validate_page_markdown,
+    find_raw_table_blocks,
+)
 
 SCRIPT_DIR = os.path.dirname(__file__)
 ASSETS_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "assets"))
 
-# Temporary provider issues: rotate profile, but do NOT permanently discard it.
 _TRANSIENT_STATUS_CODES = {408, 429, 500, 502, 503, 504}
-# Likely account/quota issues: mark profile exhausted for this run.
 _EXHAUST_STATUS_CODES = {402, 403}
 _TRANSIENT_MESSAGE_MARKERS = (
     "service temporarily unavailable",
@@ -266,6 +275,7 @@ def load_ocr_profiles(secrets_text=""):
 
 
 class ProfileManager:
+    """Select exactly one OCR profile for a run; never fail over automatically."""
     def __init__(self, profiles, start_name=None):
         if not profiles:
             raise ValueError(
@@ -273,7 +283,6 @@ class ProfileManager:
                 "PDF_OCR_<NAME>_{BASE_URL,API_KEY,MODEL}, or legacy "
                 "PDF_OCR_{BASE_URL,API_KEY,MODEL}."
             )
-        self._lock = Lock()
         self.profiles = list(profiles)
         self._index = 0
         if start_name:
@@ -285,155 +294,39 @@ class ProfileManager:
             else:
                 available = ", ".join(p["name"] for p in self.profiles)
                 raise ValueError(f"OCR profile '{start_name}' not found. Available: {available}")
-        self._clients = {}
-        self._exhausted = set()
-        # name -> unix timestamp until which this profile is temporarily skipped
-        self._cooldown_until = {}
+        self._client = None
 
     def list_public(self):
-        now = time.time()
-        with self._lock:
-            return [
-                {
-                    "name": p["name"],
-                    "base_url": p["base_url"],
-                    "model": p["model"],
-                    "active": i == self._index,
-                    "exhausted": p["name"] in self._exhausted,
-                    "cooldown_remaining": max(
-                        0, int(self._cooldown_until.get(p["name"], 0) - now)
-                    ),
-                }
-                for i, p in enumerate(self.profiles)
-            ]
+        return [
+            {
+                "name": profile["name"],
+                "base_url": profile["base_url"],
+                "model": profile["model"],
+                "active": idx == self._index,
+            }
+            for idx, profile in enumerate(self.profiles)
+        ]
 
     def current(self):
-        with self._lock:
-            return dict(self.profiles[self._index])
-
-    def _is_temporarily_skipped(self, name, now=None):
-        now = time.time() if now is None else now
-        until = self._cooldown_until.get(name, 0)
-        return until > now
+        return dict(self.profiles[self._index])
 
     def client(self):
-        with self._lock:
-            now = time.time()
-            total = len(self.profiles)
-            # Prefer a profile that is neither exhausted nor cooling down.
-            for step in range(total):
-                idx = (self._index + step) % total
-                profile = self.profiles[idx]
-                name = profile["name"]
-                if name in self._exhausted:
-                    continue
-                if self._is_temporarily_skipped(name, now):
-                    continue
-                self._index = idx
-                if name not in self._clients:
-                    self._clients[name] = OpenAI(
-                        base_url=profile["base_url"],
-                        api_key=profile["api_key"],
-                    )
-                return self._clients[name], dict(profile)
-
-            # All profiles are cooling down or exhausted. Wait for the soonest cooldown.
-            wait_candidates = [
-                (name, until)
-                for name, until in self._cooldown_until.items()
-                if name not in self._exhausted and until > now
-            ]
-            if wait_candidates:
-                name, until = min(wait_candidates, key=lambda x: x[1])
-                wait_s = max(1, int(until - now) + 1)
-                print(
-                    f"\n[profile] all free profiles cooling down; "
-                    f"waiting {wait_s}s for '{name}'..."
-                )
-                # Release lock while sleeping.
-            else:
-                wait_s = 0
-                name = None
-
-        if wait_s > 0:
-            time.sleep(wait_s)
-            with self._lock:
-                for i, profile in enumerate(self.profiles):
-                    if profile["name"] == name:
-                        self._index = i
-                        if name not in self._clients:
-                            self._clients[name] = OpenAI(
-                                base_url=profile["base_url"],
-                                api_key=profile["api_key"],
-                            )
-                        print(
-                            f"[profile] resuming '{profile['name']}' "
-                            f"(model={profile['model']})"
-                        )
-                        return self._clients[name], dict(profile)
-
-        raise RuntimeError("All OCR profiles exhausted or unavailable.")
-
-    def switch(self, reason="", permanent=False, cooldown_seconds=30):
-        with self._lock:
-            current = self.profiles[self._index]
-            now = time.time()
-            if permanent:
-                self._exhausted.add(current["name"])
-                print(
-                    f"\n[profile] '{current['name']}' exhausted"
-                    + (f": {reason}" if reason else "")
-                    + "; switching..."
-                )
-            else:
-                until = now + max(1, int(cooldown_seconds))
-                # Keep the longer cooldown if concurrent workers hit the same profile.
-                prev = self._cooldown_until.get(current["name"], 0)
-                self._cooldown_until[current["name"]] = max(prev, until)
-                print(
-                    f"\n[profile] '{current['name']}' temporary issue"
-                    + (f": {reason}" if reason else "")
-                    + f"; cooldown {int(self._cooldown_until[current['name']] - now)}s; switching..."
-                )
-
-            total = len(self.profiles)
-            for step in range(1, total + 1):
-                nxt = (self._index + step) % total
-                candidate = self.profiles[nxt]
-                name = candidate["name"]
-                if name in self._exhausted:
-                    continue
-                if self._is_temporarily_skipped(name, now):
-                    continue
-                self._index = nxt
-                print(
-                    f"[profile] now using '{candidate['name']}' "
-                    f"(model={candidate['model']})"
-                )
-                return dict(candidate)
-            return None
-
-    def available_count(self):
-        now = time.time()
-        with self._lock:
-            return sum(
-                1
-                for p in self.profiles
-                if p["name"] not in self._exhausted
-                and not self._is_temporarily_skipped(p["name"], now)
-            )
+        profile = self.profiles[self._index]
+        if self._client is None:
+            self._client = OpenAI(base_url=profile["base_url"], api_key=profile["api_key"])
+        return self._client, dict(profile)
 
 
 PROFILE_MANAGER = None
 
 
-def countdown_timer(seconds):
-    for remaining in range(seconds, 0, -1):
-        sys.stdout.write(f"\rWaiting for {remaining} seconds...  ")
-        sys.stdout.flush()
-        time.sleep(1)
-    sys.stdout.write("\rWait complete!            \n")
-    sys.stdout.flush()
+class OCRPageOutputError(RuntimeError):
+    """Model returned page text that must not be accepted as a completed page."""
+    def __init__(self, message, *, output_text="", finish_reason="", profile=None):
+        super().__init__(message)
+        self.output_text = output_text or ""
+        self.finish_reason = finish_reason or ""
+        self.profile = profile or {}
 
 
 def update_progress(completed, total):
@@ -522,23 +415,6 @@ def read_single_path(path):
     return ""
 
 
-def find_max_index(output_dir):
-    if not os.path.isdir(output_dir):
-        return -1
-    nums = set()
-    for name in os.listdir(output_dir):
-        if name.endswith(".md"):
-            stem = os.path.splitext(name)[0]
-            if stem.endswith(".fail"):
-                stem = stem[:-5]
-            if stem.isdigit():
-                nums.add(int(stem))
-    idx = 0
-    while idx in nums:
-        idx += 1
-    return idx - 1
-
-
 def find_max_image_index(images_dir):
     if not os.path.isdir(images_dir):
         return -1
@@ -605,16 +481,6 @@ def _classify_provider_error(exc):
 
 def _is_switchable_error(exc):
     return _classify_provider_error(exc) is not None
-
-
-def _cooldown_seconds_for_error(exc):
-    status = _error_status_code(exc)
-    text = str(exc).lower()
-    if status == 429 or "rate limit" in text or "too many requests" in text:
-        return 60
-    if status in {500, 502, 503, 504} or "temporarily unavailable" in text:
-        return 45
-    return 30
 
 
 def _extract_last_table_header_block(md_text, max_chars=2500):
@@ -723,11 +589,31 @@ def _compose_page_prompt(prompt_text, image_filename, table_context=""):
     return parts
 
 
-def extract_text_from_openai_api(image_path, page_num, prompt_text, table_context=""):
-    """
-    Send one image to the configured OCR profile only.
-    No auto-switch. On 503 / temporary provider errors, raise immediately.
-    """
+def _sanitize_page_tables(text):
+    """Validate and canonicalize model-generated raw HTML tables."""
+    out = []
+    pos = 0
+    for block_start, block_end, block in find_raw_table_blocks(text):
+        out.append(text[pos:block_start])
+        out.append(sanitize_html_table_block(block))
+        pos = block_end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _is_truncated_finish_reason(reason):
+    value = (reason or "").strip().upper()
+    return any(marker in value for marker in ("LENGTH", "MAX_TOKEN", "MAX_OUTPUT"))
+
+
+def extract_text_from_openai_api(
+    image_path,
+    page_num,
+    prompt_text,
+    table_context="",
+    max_tokens=8192,
+):
+    """OCR one image with one selected profile; fail closed on truncation."""
     prohibited_sentinel = "__PROHIBITED_CONTENT__"
     client, profile = PROFILE_MANAGER.client()
     selected_model = profile["model"]
@@ -750,27 +636,19 @@ def extract_text_from_openai_api(image_path, page_num, prompt_text, table_contex
                     "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
                 }
             )
-            messages = [
-                {
-                    "role": "user",
-                    "content": content_parts,
-                }
-            ]
-            # Dense mixed pages (tables + prose) need enough completion budget;
-            # without max_tokens some gateways default low and cut mid-table.
+            messages = [{"role": "user", "content": content_parts}]
             create_kwargs = {
                 "model": selected_model,
                 "messages": messages,
-                "max_tokens": 8192,
+                "max_tokens": max_tokens,
             }
             try:
                 response = client.chat.completions.create(**create_kwargs)
             except Exception as token_err:
-                # Some models only accept max_completion_tokens
                 msg = str(token_err).lower()
                 if "max_tokens" in msg or "max_completion_tokens" in msg:
                     create_kwargs.pop("max_tokens", None)
-                    create_kwargs["max_completion_tokens"] = 8192
+                    create_kwargs["max_completion_tokens"] = max_tokens
                     try:
                         response = client.chat.completions.create(**create_kwargs)
                     except Exception:
@@ -783,14 +661,38 @@ def extract_text_from_openai_api(image_path, page_num, prompt_text, table_contex
                     raise
 
             finish_reason = _get_finish_reason(response)
-            if finish_reason and "CONTENT_FILTER" in finish_reason.upper():
-                return prohibited_sentinel
-            if finish_reason and "PROHIBITED_CONTENT" in finish_reason.upper():
-                return prohibited_sentinel
+            upper_reason = finish_reason.upper()
+            if "CONTENT_FILTER" in upper_reason or "PROHIBITED_CONTENT" in upper_reason:
+                return prohibited_sentinel, finish_reason, profile
 
             content_text = _extract_text_from_response(response)
+            if _is_truncated_finish_reason(finish_reason):
+                raise OCRPageOutputError(
+                    f"OCR response truncated for page {page_num}: finish_reason={finish_reason}",
+                    output_text=content_text,
+                    finish_reason=finish_reason,
+                    profile=profile,
+                )
             if content_text:
-                return content_text
+                try:
+                    content_text = _sanitize_page_tables(content_text)
+                except Exception as validation_exc:
+                    raise OCRPageOutputError(
+                        f"OCR HTML validation failed for page {page_num}: {validation_exc}",
+                        output_text=content_text,
+                        finish_reason=finish_reason,
+                        profile=profile,
+                    ) from validation_exc
+                errors = validate_page_markdown(content_text, allow_placeholders=True)
+                if errors:
+                    raise OCRPageOutputError(
+                        f"OCR structural validation failed for page {page_num}: "
+                        + "; ".join(errors),
+                        output_text=content_text,
+                        finish_reason=finish_reason,
+                        profile=profile,
+                    )
+                return content_text, finish_reason or "stop", profile
 
             last_error_message = (
                 f"Empty OCR response for page {page_num} "
@@ -798,39 +700,72 @@ def extract_text_from_openai_api(image_path, page_num, prompt_text, table_contex
             )
 
         except Exception as e:
+            if isinstance(e, OCRPageOutputError) and e.output_text:
+                # Preserve rejected model output for diagnosis; never count it as completed.
+                atomic_write_text(
+                    os.path.join(output_dir, f"{os.path.splitext(os.path.basename(image_path))[0]}.partial.md"),
+                    e.output_text.rstrip() + "\n",
+                )
             error_message = f"\nError processing page {page_num} via profile '{profile['name']}':\n"
             error_message += f"Error Type: {type(e).__name__}\n"
             error_message += f"Error Message: {str(e)}\n"
             status = _error_status_code(e)
             if status is not None:
                 error_message += f"Status Code: {status}\n"
-            if hasattr(e, "response"):
-                error_message += f"Response: {e.response}\n"
             last_error_message = error_message
-
-            # Strict mode: temporary provider/quota issues fail immediately.
-            if _is_switchable_error(e) or status == 503:
-                print(error_message)
-                raise RuntimeError(
-                    f"OCR profile '{profile['name']}' failed"
-                    + (f" with status {status}" if status is not None else "")
-                    + f": {e}"
-                ) from e
-
+            if status == 503 or _is_switchable_error(e):
+                if attempt >= max_attempts:
+                    print(error_message)
+                    raise RuntimeError(error_message) from e
+                wait = min(2 ** attempt, 12)
+                print(f"{error_message}\nRetrying same profile in {wait}s...")
+                time.sleep(wait)
+                continue
             if attempt >= max_attempts:
                 print(error_message)
                 raise RuntimeError(error_message) from e
-
             time.sleep(min(2 ** attempt, 8))
 
     raise RuntimeError(last_error_message or f"OCR failed for page {page_num}")
 
+def _page_metadata(image_path, text, prompt_text, profile, finish_reason):
+    return {
+        "status": "ok",
+        "validated": True,
+        "image_sha256": sha256_file(image_path),
+        "prompt_sha256": sha256_text(prompt_text),
+        "output_sha256": sha256_text(text),
+        "profile": profile.get("name"),
+        "model": profile.get("model"),
+        "finish_reason": finish_reason or "stop",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
 
-def process_images(images_dir, output_dir, prompt_text, start_idx=None, end_idx=None, batch_size=6):
+
+def _write_failed_page(output_dir, stem, status, error, extra=None):
+    payload = {
+        "status": status,
+        "validated": False,
+        "error": str(error),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if extra:
+        payload.update(extra)
+    atomic_write_json(os.path.join(output_dir, f"{stem}.fail.json"), payload)
+
+
+def process_images(
+    images_dir,
+    output_dir,
+    prompt_text,
+    start_idx=None,
+    end_idx=None,
+    batch_size=1,
+    max_tokens=8192,
+    trust_existing=False,
+):
     if not os.path.isdir(images_dir):
-        print(f"Images directory not found: {images_dir}")
-        return
-
+        raise RuntimeError(f"Images directory not found: {images_dir}")
     os.makedirs(output_dir, exist_ok=True)
 
     exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tif", "*.tiff", "*.webp")
@@ -838,130 +773,162 @@ def process_images(images_dir, output_dir, prompt_text, start_idx=None, end_idx=
     for ext in exts:
         image_files.extend(glob.glob(os.path.join(images_dir, ext)))
     if not image_files:
-        print(f"No images found in: {images_dir}")
-        return
-    if start_idx is not None and end_idx is not None:
+        raise RuntimeError(f"No images found in: {images_dir}")
+
+    if start_idx is not None or end_idx is not None:
         filtered = []
         for path in image_files:
-            name = os.path.splitext(os.path.basename(path))[0]
-            if name.isdigit():
-                num = int(name)
-                if start_idx <= num <= end_idx:
-                    filtered.append(path)
+            stem = os.path.splitext(os.path.basename(path))[0]
+            if not stem.isdigit():
+                continue
+            num = int(stem)
+            if start_idx is not None and num < start_idx:
+                continue
+            if end_idx is not None and num > end_idx:
+                continue
+            filtered.append(path)
         image_files = filtered
         if not image_files:
-            print(f"No images found in range {start_idx}-{end_idx}: {images_dir}")
-            return
-    image_files = sorted(
-        image_files,
-        key=lambda p: int(os.path.splitext(os.path.basename(p))[0])
-        if os.path.splitext(os.path.basename(p))[0].isdigit()
-        else os.path.basename(p),
-    )
+            raise RuntimeError(f"No numeric images found in requested range: {start_idx}-{end_idx}")
 
+    image_files = sorted(image_files, key=natural_path_key)
     total = len(image_files)
-    fail_count = 0
-
-    def _process_one(image_path, idx):
-        nonlocal fail_count
-        base_name = os.path.splitext(os.path.basename(image_path))[0]
-        out_path = os.path.join(output_dir, f"{base_name}.md")
-        # Resume: skip non-empty completed pages
-        if os.path.isfile(out_path):
-            try:
-                if os.path.getsize(out_path) > 0:
-                    return
-            except OSError:
-                pass
-        # Sequential page order preserves prior-page table headers for continuations.
-        table_context = _prior_page_table_context(image_path, output_dir)
-        text = extract_text_from_openai_api(
-            image_path, idx, prompt_text, table_context=table_context
-        )
-        if text == "__PROHIBITED_CONTENT__":
-            fail_path = os.path.join(output_dir, f"{base_name}.fail.md")
-            try:
-                with open(fail_path, "w", encoding="utf-8") as md_file:
-                    md_file.write("")
-            except Exception:
-                pass
-            fail_count += 1
-            return
-        if text is None:
-            raise RuntimeError(f"No content after retries on page {idx}. Please intervene.")
-        try:
-            with open(out_path, "w", encoding="utf-8") as md_file:
-                md_file.write(text)
-        except Exception:
-            pass
-
-    # Process pages in index order (not concurrent batches) so continued tables can
-    # reuse the previous page's header. batch_size is retained for CLI compatibility
-    # but no longer parallelizes across pages.
-    if batch_size and int(batch_size) > 1:
-        print(
-            "Note: table-continuation mode runs pages sequentially "
-            f"(batch_size={batch_size} ignored for parallelism)."
-        )
+    prompt_hash = sha256_text(prompt_text)
     completed = 0
-    items = list(enumerate(image_files, start=1))
+    skipped = 0
     update_progress(0, total)
-    for idx, image_path in items:
+
+    for idx, image_path in enumerate(image_files, start=1):
+        stem = os.path.splitext(os.path.basename(image_path))[0]
+        out_path = os.path.join(output_dir, f"{stem}.md")
+        meta_path = page_meta_path(output_dir, stem)
+        if trust_existing and os.path.isfile(out_path) and not os.path.isfile(meta_path):
+            with open(out_path, "r", encoding="utf-8", errors="replace") as legacy_file:
+                legacy_text = legacy_file.read()
+            legacy_errors = validate_page_markdown(legacy_text, allow_placeholders=True)
+            if not legacy_errors:
+                atomic_write_json(
+                    meta_path,
+                    {
+                        "status": "ok",
+                        "validated": True,
+                        "image_sha256": sha256_file(image_path),
+                        "prompt_sha256": prompt_hash,
+                        "output_sha256": sha256_file(out_path),
+                        "profile": "legacy-adopted",
+                        "model": "unknown",
+                        "finish_reason": "legacy-adopted",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+        if page_is_valid(
+            image_path,
+            out_path,
+            meta_path,
+            prompt_hash=prompt_hash,
+            trust_existing=trust_existing,
+        ):
+            skipped += 1
+            completed += 1
+            update_progress(completed, total)
+            continue
+
+        table_context = _prior_page_table_context(image_path, output_dir)
+        page_num = int(stem) if stem.isdigit() else idx
         try:
-            _process_one(image_path, idx)
-        except Exception as e:
-            print(f"\n{e}")
-            sys.exit(1)
+            result = extract_text_from_openai_api(
+                image_path,
+                page_num,
+                prompt_text,
+                table_context=table_context,
+                max_tokens=max_tokens,
+            )
+            text, finish_reason, profile = result
+            if text == "__PROHIBITED_CONTENT__":
+                _write_failed_page(
+                    output_dir,
+                    stem,
+                    "prohibited",
+                    f"finish_reason={finish_reason}",
+                    {"finish_reason": finish_reason, "profile": profile.get("name")},
+                )
+                print(f"Prohibited OCR content on page {stem}; recorded as fail and continuing.")
+                completed += 1
+                update_progress(completed, total)
+                continue
+            errors = validate_page_markdown(text, allow_placeholders=True)
+            if errors:
+                raise RuntimeError("; ".join(errors))
+            meta = _page_metadata(image_path, text, prompt_text, profile, finish_reason)
+            atomic_write_text(out_path, text.rstrip() + "\n")
+            meta["output_sha256"] = sha256_file(out_path)
+            atomic_write_json(meta_path, meta)
+            fail_path = os.path.join(output_dir, f"{stem}.fail.json")
+            partial_path = os.path.join(output_dir, f"{stem}.partial.md")
+            for stale_path in (fail_path, partial_path):
+                if os.path.exists(stale_path):
+                    os.remove(stale_path)
+        except Exception as exc:
+            _write_failed_page(
+                output_dir,
+                stem,
+                "failed",
+                exc,
+                {"image_sha256": sha256_file(image_path), "prompt_sha256": prompt_hash},
+            )
+            print(f"Page {stem} failed and was recorded; continuing: {exc}")
         completed += 1
         update_progress(completed, total)
 
+    fail_count = len(glob.glob(os.path.join(output_dir, "*.fail.json")))
+    print(f"Validated/skipped existing pages: {skipped}")
     if fail_count:
-        print(f"Fail pages: {fail_count}")
+        print(f"Failed pages: {fail_count}")
+        raise RuntimeError(f"OCR completed with {fail_count} failed page(s). See *.fail.json")
 
-
-def process_single_image(image_path, output_dir, output_file, prompt_text):
+def process_single_image(
+    image_path,
+    output_dir,
+    output_file,
+    prompt_text,
+    max_tokens=8192,
+):
     if not os.path.isfile(image_path):
-        print(f"Image file not found: {image_path}")
-        return
+        raise RuntimeError(f"Image file not found: {image_path}")
 
     if output_file:
         out_path = output_file
-        out_dir = os.path.dirname(out_path)
-        if out_dir:
-            os.makedirs(out_dir, exist_ok=True)
+        out_dir = os.path.dirname(out_path) or "."
+        os.makedirs(out_dir, exist_ok=True)
     else:
         os.makedirs(output_dir, exist_ok=True)
-        base_name = os.path.splitext(os.path.basename(image_path))[0]
-        out_path = os.path.join(output_dir, f"{base_name}.md")
+        stem = os.path.splitext(os.path.basename(image_path))[0]
+        out_path = os.path.join(output_dir, f"{stem}.md")
+        out_dir = output_dir
 
-    # Prefer sibling ocr-result for prior-page context when output_file is custom.
-    context_dir = output_dir
-    if output_file:
-        sibling = os.path.dirname(os.path.abspath(output_file))
-        if sibling:
-            context_dir = sibling
-    table_context = _prior_page_table_context(image_path, context_dir)
-    text = extract_text_from_openai_api(
-        image_path, 1, prompt_text, table_context=table_context
-    )
-    if text == "__PROHIBITED_CONTENT__":
-        fail_path = os.path.join(
-            output_dir, f"{os.path.splitext(os.path.basename(image_path))[0]}.fail.md"
-        )
-        try:
-            with open(fail_path, "w", encoding="utf-8") as md_file:
-                md_file.write("")
-        except Exception:
-            pass
-        return
-    if text is None:
-        print("No content after retries. Please intervene.")
-        sys.exit(1)
+    stem = os.path.splitext(os.path.basename(image_path))[0]
+    table_context = _prior_page_table_context(image_path, out_dir)
     try:
-        with open(out_path, "w", encoding="utf-8") as md_file:
-            md_file.write(text)
-    except Exception:
-        pass
+        text, finish_reason, profile = extract_text_from_openai_api(
+            image_path,
+            int(stem) if stem.isdigit() else 1,
+            prompt_text,
+            table_context=table_context,
+            max_tokens=max_tokens,
+        )
+        if text == "__PROHIBITED_CONTENT__":
+            _write_failed_page(out_dir, stem, "prohibited", f"finish_reason={finish_reason}")
+            raise RuntimeError(f"Prohibited OCR content on page {stem}")
+        errors = validate_page_markdown(text, allow_placeholders=True)
+        if errors:
+            raise RuntimeError("; ".join(errors))
+        atomic_write_text(out_path, text.rstrip() + "\n")
+        meta = _page_metadata(image_path, text, prompt_text, profile, finish_reason)
+        meta["output_sha256"] = sha256_file(out_path)
+        atomic_write_json(page_meta_path(out_dir, stem), meta)
+    except Exception as exc:
+        _write_failed_page(out_dir, stem, "failed", exc)
+        raise
 
 
 def main():
@@ -1041,7 +1008,18 @@ def main():
         "--batch-size",
         type=int,
         default=None,
-        help="Concurrent batch size (default: PDF_OCR_BATCH_SIZE or 6).",
+        help="Deprecated compatibility option; OCR pages are always sequential.",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=8192,
+        help="Maximum OCR completion tokens per page (default: 8192).",
+    )
+    parser.add_argument(
+        "--trust-existing",
+        action="store_true",
+        help="Adopt structurally valid legacy N.md files without metadata; use once for migration.",
     )
     parser.add_argument(
         "--prompt-file",
@@ -1081,15 +1059,9 @@ def main():
         print("Configured OCR profiles:")
         for item in PROFILE_MANAGER.list_public():
             mark = "*" if item["active"] else " "
-            flags = []
-            if item.get("exhausted"):
-                flags.append("exhausted")
-            if item.get("cooldown_remaining"):
-                flags.append(f"cooldown={item['cooldown_remaining']}s")
-            flag_text = f" [{', '.join(flags)}]" if flags else ""
             print(
                 f"  {mark} {item['name']}: model={item['model']} "
-                f"base_url={item['base_url']}{flag_text}"
+                f"base_url={item['base_url']}"
             )
         return
 
@@ -1098,17 +1070,9 @@ def main():
         f"Active OCR profile: {current['name']} "
         f"(model={current['model']}, base_url={current['base_url']})"
     )
-    print("Mode: single profile only; no auto profile switch. Temporary 503/quota errors fail immediately.")
-    if args.batch_size is None:
-        raw_batch = _env("PDF_OCR_BATCH_SIZE")
-        try:
-            args.batch_size = int(raw_batch) if raw_batch else 6
-        except ValueError:
-            print(
-                f"Invalid PDF_OCR_BATCH_SIZE={raw_batch!r}; falling back to 6."
-            )
-            args.batch_size = 6
-    args.batch_size = max(1, int(args.batch_size))
+    print("Mode: sequential pages; strict validation; no automatic profile switch.")
+    args.batch_size = 1
+    args.max_tokens = max(256, int(args.max_tokens))
 
     base_dir = args.base_dir
     if args.base_dir_from:
@@ -1152,23 +1116,17 @@ def main():
         start_idx = None
         end_idx = None
     auto_range = False
-    auto_start_from = None
     auto_end_from = None
     if input_file:
         start_idx = None
         end_idx = None
     elif start_idx is None and end_idx is None:
         auto_range = True
-        max_idx = find_max_index(output_dir)
-        start_idx = max_idx + 1
-        auto_start_from = max_idx
+        # Scan all numeric images. Per-page metadata determines which pages are safely skipped.
+        start_idx = None
         images_max_idx = find_max_image_index(images_dir)
-        if images_max_idx >= start_idx:
-            end_idx = images_max_idx
-            auto_end_from = images_max_idx
-        else:
-            end_idx = start_idx + 49
-            auto_end_from = end_idx
+        end_idx = images_max_idx if images_max_idx >= 0 else None
+        auto_end_from = images_max_idx
 
     prompt_text = _load_prompt(prompt_path)
 
@@ -1177,7 +1135,6 @@ def main():
     print(f"Output directory: {output_dir}")
     print(f"Output file: {output_file or '(auto)'}")
     if auto_range:
-        print(f"Auto start from (last continuous output index): {auto_start_from}")
         print(f"Auto end from (max image index or fallback): {auto_end_from}")
     print(f"Image index range: {start_idx}-{end_idx}")
     print(f"Prompt file: {prompt_path}")
@@ -1189,6 +1146,7 @@ def main():
             output_dir,
             output_file,
             prompt_text,
+            max_tokens=args.max_tokens,
         )
     else:
         process_images(
@@ -1198,6 +1156,8 @@ def main():
             start_idx=start_idx,
             end_idx=end_idx,
             batch_size=args.batch_size,
+            max_tokens=args.max_tokens,
+            trust_existing=args.trust_existing,
         )
 
 

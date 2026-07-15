@@ -1,178 +1,91 @@
-CRITICAL: 
-- 先提供命令（windows环境下的绝对路径）给用户让用户自己运行，用户要求你来执行命令时，你再执行命令。
-- 一旦命令开始执行，进度条显示[RUNNING]，你就不应重复执行任务或者擅自中断任务──直至命令执行完毕，显示[OVER]再做出反应。
-- 如果你是Antigravity, 你应该在命令运行之后就停止输出该次对话，留命令在后台执行，用**中文**告诉用户应该在上方的Background Steps去查看进度，下方出现ERROR不影响生成进度。不需要你来monitor. 把对话控制权交还给用户，等待用户下一步指令。其他AI Agent忽略该指令。
-- 若用户未指定开始和中止页码，不需要你来执行任何powershell命令来判断页数，你不应该擅自指定 --start; --end;和--batch 参数，你调用的脚本会自动判断页数。
-- 若用户指定了开始和中止页码──你在列plan时不要把任务分很多条命令的小任务，如果你读取到的start参数是0, end参数是451, 那么你就列一条命令，像是`python .agent/skills/pdf-set/scripts/ocr.py --base-dir "C:\path\to" --book-name "某书" --start 0 --end 451`就可以了。不可以用`--start 0 --end 50`、`--start 51 --end 100`……`--start 400 --end 451`这样的多份小任务分批处理。
+# OCR
 
 ## 输入/输出
-- 输入：`images/` 中的图片文件（支持 jpg/jpeg/png/bmp/tif/tiff/webp），按文件名前序号排序。
-- 输入（单文件）：指定单张图片文件路径。
-- 输出：`ocr-result/` 中的单页文件，文件名为「原图序号.md」，一一对应。
-  - 单文件输出：默认写入 `ocr-result/`，文件名为「原图文件名.md」，也可指定输出文件路径。
+- 输入：`<book>/images/` 中按数字命名的图片；支持 jpg/jpeg/png/bmp/tif/tiff/webp。
+- 输出：`<book>/ocr-result/N.md` + `N.meta.json`。
+- 失败：`N.fail.json`；截断、结构错误、API 失败均不得冒充正式页。
+- 单页：`--input-file`，可配 `--output-file`。
 
-## 表格 / 混排页（重要）
-- 同一页可「正文 + 表题 + 表格 + 正文」；**不要**因有表就整页 `🀄️`。
-- **表内禁止塞注释**：表头/单元格只留可见字与注号（① 等）；脚注放表外 `<sup>【】</sup>`。
-- **单层表头 / 叙述型名单表**（如「表5—6」姓名、职务、轨迹）→ **GFM 管道表**，**不要**加 `table-dense`；长单元格允许换行，保持可读字号。
-- **多级表头 / 跨列合并 / 统计密表**（如「表5—5」）→ HTML `<table>` + `rowspan`/`colspan`，外包 `div.table-wrap`，table 加 `class="table-dense"`（单元格 `nowrap`、略缩小字号；宽表横滑，**不要 scale 缩小叙述表**）。
-- **禁止**把多级表头压扁成一行后丢失上层分组。
-- **跨页表**：起表页完整表头；续表页重复同一表头结构（GFM 或 HTML thead）再接新行；`ocr.py` 会从上页 `ocr-result` 注入末表表头。
-- **顺序处理**：为继承续表表头，批量 OCR **按页序串行**（`--batch-size` 不再并行翻页）。
-- 请求默认 `max_tokens=8192`，降低密表+长正文截断概率。
-- 旧结果不合格：删 `ocr-result/N.md` 后单页重跑。
+## 配置
+推荐环境变量：
 
-## 脚本参考
-
-- 使用 `scripts/ocr.py` 完成 OCR。
-- OCR 统一使用 OpenAI Python 库。
-- **优先**用环境变量配置；`assets/secrets_openai.txt` 仅作兼容回退，且**不要**把真实密钥提交到 Git。
-- 默认按当前工作目录推导路径：
-  - 输入：`<当前目录>/images/`
-  - 输出：`<当前目录>/ocr-result/`
-  - Prompt：`<skill-dir>/assets/ocr_prompt.md`
-
-### 模型配置
-
-可同时**保存**多组 OCR 后端，但运行时**只使用一组**：`PDF_OCR_PROFILE` 或 `--profile` 指定的那一组。
-
-#### 严格规则
-
-- **只用一组**：始终使用 `PDF_OCR_PROFILE` / `--profile` 指定的 profile。
-- **不自动切换**：不会在失败时改用其他 profile。
-- **按页顺序串行**（保证跨页表格继承上页表头）；`--batch-size` / `PDF_OCR_BATCH_SIZE` 保留兼容，但不再并行翻页。
-- 请求默认 `max_tokens=8192`（部分模型回退 `max_completion_tokens`）。
-- **503 / 额度耗尽 / 临时服务不可用**：直接报错退出。
-- 需要换模型时：手动改 `PDF_OCR_PROFILE`，或下次运行加 `--profile backup`。
-
-#### 方式 A：环境变量多 profile（推荐）
-
-1. 声明 profile 列表：
-
-```bash
+```text
 PDF_OCR_PROFILES=primary,backup
-```
-
-2. 为每组配置三元组：
-
-```bash
-PDF_OCR_PRIMARY_BASE_URL=https://provider-a.example/v1
+PDF_OCR_PRIMARY_BASE_URL=...
 PDF_OCR_PRIMARY_API_KEY=...
-PDF_OCR_PRIMARY_MODEL=vision-model-a
-
-PDF_OCR_BACKUP_BASE_URL=https://provider-b.example/v1
-PDF_OCR_BACKUP_API_KEY=...
-PDF_OCR_BACKUP_MODEL=vision-model-b
-```
-
-3. 指定本次实际使用的 profile：
-
-```bash
+PDF_OCR_PRIMARY_MODEL=...
 PDF_OCR_PROFILE=primary
-# 或命令行覆盖：
-python scripts/ocr.py --profile backup --base-dir "书籍目录"
 ```
 
-4. 配置并发页数：
-
-```bash
-PDF_OCR_BATCH_SIZE=6
-# 或命令行覆盖：
-python scripts/ocr.py --batch-size 6 --base-dir "书籍目录"
-```
-
-优先级：`--batch-size` > `PDF_OCR_BATCH_SIZE` > 默认 `6`。
-
-#### 方式 B：兼容旧的单组环境变量
-
-若不需要多组，仍可继续用：
-
-```bash
-PDF_OCR_BASE_URL=...
-PDF_OCR_API_KEY=...
-PDF_OCR_MODEL=...
-```
-
-#### 方式 C：secrets 分段（可选，本地调试）
-
-`assets/secrets_openai.txt` 支持：
+旧单组变量仍兼容：
 
 ```text
-profiles = primary,backup
-
-[primary]
-base_url = "https://provider-a.example/v1"
-api_key = "..."
-model = "vision-model-a"
-
-[backup]
-base_url = "https://provider-b.example/v1"
-api_key = "..."
-model = "vision-model-b"
+PDF_OCR_BASE_URL / PDF_OCR_API_KEY / PDF_OCR_MODEL
 ```
 
-也兼容旧的单组格式：
+本地 ignored 的 `assets/secrets_openai.txt` 仅作兼容，不得提交真实密钥。
 
-```text
-base_url = "..."
-api_key = "..."
-model = "..."
-```
-
-### 查看已配置 profile（不输出密钥）
+查看 profile（不输出 key）：
 
 ```bash
-python .agent/skills/pdf-set/scripts/ocr.py --list-profiles
+python scripts/ocr.py --list-profiles
 ```
 
-### 路径参数
+运行时仅使用 `--profile` / `PDF_OCR_PROFILE` 指定的一组，不自动切换。
 
-- 可选参数：
-  - `--base-dir` 指定书籍目录
-  - `--book-name` 指定书籍名（自动定位到 `<base-dir>/<书籍名>`）
-  - `--input-dir` 指定完整输入目录
-  - `--input-file` 指定单张图片路径（将忽略 `--input-dir` 与 `--start/--end`）
-  - `--output-dir` 指定完整输出目录
-  - `--output-file` 指定单张输出 Markdown 文件路径
-  - `--start` 指定起始序号（含）
-  - `--end` 指定结束序号（含）
-  - `--batch-size` 并发页数（默认 6；也可用 `PDF_OCR_BATCH_SIZE`）
-  - `--prompt-file` 指定 prompt 文件路径
-  - `--profile` 指定本次使用的 OCR profile
-  - `--list-profiles` 列出可用 profile 后退出
-  - `--base-dir-from` 使用 UTF-8 文本文件提供书籍目录（首个非空行）
-  - `--input-dir-from` 使用 UTF-8 文本文件提供输入目录（首个非空行）
-  - `--input-file-from` 使用 UTF-8 文本文件提供单张图片路径（首个非空行）
-  - `--output-dir-from` 使用 UTF-8 文本文件提供输出目录（首个非空行）
-  - `--output-file-from` 使用 UTF-8 文本文件提供单张输出文件路径（首个非空行）
-  - `--prompt-file-from` 使用 UTF-8 文本文件提供 prompt 文件路径（首个非空行）
-
-示例：
+## 执行
 
 ```bash
-python .agent/skills/pdf-set/scripts/ocr.py --base-dir "C:\path\to" --book-name "某书" --start 0 --end 20
+python scripts/ocr.py --base-dir "书籍目录" --profile primary
 ```
 
-手动指定另一组模型：
+单页：
 
 ```bash
-python .agent/skills/pdf-set/scripts/ocr.py --base-dir "C:\path\to\某书" --profile backup
+python scripts/ocr.py --base-dir "书籍目录" --input-file "书籍目录/images/20.jpg" --profile primary
 ```
 
-单文件示例：
+可选参数：
+- `--start` / `--end`：数字图片索引开区间/闭区间；可只给一个。
+- `--max-tokens`：单页输出上限，默认 8192。
+- `--trust-existing`：一次性迁移旧版非空 `N.md`；仅结构校验通过才写入 sidecar。之后不要再依赖此参数。
+- `--batch-size`：废弃兼容参数；页面始终顺序处理，以支持续表。
+- `--prompt-file`、`--profile` 及 `*-from` 路径参数。
+
+## 强完整性规则
+1. `finish_reason=length/max_tokens/max_output_tokens` 视为失败，不写正式页。
+2. 模型生成的 HTML 表只允许 table 白名单标签/属性；标签和表格网格必须通过校验。
+3. 写入顺序：原子写 `N.md`，再原子写 `N.meta.json`。
+4. 断点续跑仅跳过：图片 hash、prompt hash、输出 hash 匹配且 `validated=true` 的页。
+5. API/结构错误写 `N.fail.json` 并退出；修复后重跑即可。
+6. OCR 完成后必须执行：
 
 ```bash
-python .agent/skills/pdf-set/scripts/ocr.py --input-file "C:\path\to\images\20.jpg"
+python scripts/validate_ocr.py --base-dir "书籍目录"
 ```
+
+严格禁止残留图片占位时：
 
 ```bash
-python .agent/skills/pdf-set/scripts/ocr.py --input-file "C:\path\to\images\20.jpg" --output-file "C:\path\to\ocr-result\20.md"
+python scripts/validate_ocr.py --base-dir "书籍目录" --strict-placeholders
 ```
 
-## 阶段 1：检查该书籍目录下images目录是否存在
+## 表格
+- 混排页可输出「正文 + 表题 + 表格 + 正文」，不要整页图片化。
+- 单层/叙述表：GFM，长文本显示可自动换行。
+- 多级/统计密表：白名单 HTML + `table-wrap` + `table-dense`，保留 rowspan/colspan。
+- 注释不塞进单元格。
+- 续页重复表头供单页读取；`merge_rough.py` 会在表头 signature 完全一致时保守合并。
 
-## 阶段 2: 按照我的要求设置脚本的参数，不设置任何多余项。
+详见 `assets/ocr_prompt.md`。
 
-## 阶段 3：不做任何其他检查地，运行你设置好必要参数后的脚本。
+## 全书任务
+- 若用户只要求 OCR：停在 OCR + `validate_ocr.py`，不要擅自导 EPUB。
+- 若用户要求 PDF→EPUB：使用 `scripts/pdf_to_epub.py` 和 `references/OCR进度检查.md`。
+- 进度统一读取：
 
-## 阶段4: 把脚本留在后台运行，等待用户进一步指令。
+```bash
+python scripts/ocr_status.py --base-dir "书籍目录" --json
+```
+
+定时任务必须只保留一个 ETA once；未完成重算后再建下一个。

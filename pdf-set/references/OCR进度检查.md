@@ -1,102 +1,42 @@
 # OCR 进度检查
 
-CRITICAL:
-- 每次开始一本书的全量 OCR 转换时，必须先预估完成时间，并创建 **once** follow-up 定时检查。
-- 检查到点后严格按本文执行；未完成则递归再排下一次检查。
-- 回复要简洁；**绝不要泄露任何 API key / secrets**。
-- 本 skill 要能提交 GitHub，并在 **minis** 与 **Linux/OpenClaw** 两类环境工作；调度器按当前环境选择，不要写死只支持一种。
-- 完成后 **必须把 EPUB 发回用户**，并先通过 `references/导出EPUB.md` 的质量检查。
+仅在用户要求**全书 PDF→EPUB 且需要后台自动跟进**时使用。用户只要求 OCR 时，OCR 完成后停在 `validate_ocr.py`。
 
-## 环境适配（先识别，再调度）
+## 状态来源
+不要用 `ls *.md | wc -l`，因为 fail/partial/旧结果可能冒充完成。
+统一执行：
 
-### A. minis 环境特征
-- 书籍路径常见：`/var/minis/mounts/minis/<书名>`
-- 日志常见：`ocr-run.log`
-- 调度工具：`minis-scheduled`（once follow-up）
-- 完成通知：优先 `android-notification`
-- 会话回投：用户指定的 session id
-
-### B. Linux / OpenClaw 环境特征
-- 书籍路径常见：`~/.openclaw/workspace/books/<书名>` 或用户给定目录
-- 日志常见：`ocr.log` / `ocr-run.log`
-- 调度工具：OpenClaw `cron`（`schedule.kind=at` + `payload.kind=agentTurn` + `sessionTarget=current`）
-- 完成通知：当前聊天渠道回传；`android-notification` 可用才用
-- 文件回传：Telegram 优先 `MEDIA:<epub>`；失败再 Bot API / MTProto 文档发送
-
-### 选择规则
-1. 若用户明确给了 minis 路径或要求 `minis-scheduled` → 用 minis 方式。
-2. 若当前是 OpenClaw/Telegram 会话且无 minis 工具 → 用 OpenClaw `cron`。
-3. 两者都可用时：优先跟随用户指令/路径所在环境。
-4. 不要在 skill 文档或 GitHub 内容里绑定单一机器的绝对路径。
-
-## 适用场景
-- 用户要求把 PDF 直接转成 EPUB，并在 OCR 期间自动跟进。
-- 用户发来类似“检查《书名》OCR进度”的指令。
-- OCR 已经后台跑起来，需要定时回查。
-
-## 必要信息（检查提示里带齐）
-- 书名 / label
-- 书籍目录（按环境替换）
-- 总页数 `total`
-- OCR 输出目录：默认 `<book>/ocr-result/`
-- 日志文件：`<book>/ocr.log` 或 `<book>/ocr-run.log`
-- OCR profile：当前 `PDF_OCR_PROFILE`（只写名称，不写 key）
-- 目标会话：当前用户会话 / 用户指定 session
-
-## 定时任务数量与生命周期（强制）
-- **一次只保留 1 个** 与本书相关的 once 进度检查：时间 = **预估完成时刻**（可加约 10–15% 缓冲；不少于 5 分钟后）。
-- **禁止**开跑时一次创建多个检查（如每 30 分钟一串）。
-- **禁止**在未完成时把“更晚的预估完成”检查直接删光且不再创建下一次。
-- 到点检查结果分支：
-  1. **已完成（OCR 满页且后续流水线也做完）** → 删除本书相关、尚未执行的 once 任务，再回复/回传 EPUB。
-  2. **未完成** → 按最新 mtime 重算 ETA，**创建下一个** once（label 可带 `HH:MM`）；可删已过期/已触发的，但必须留下合理的下一次 ETA。
-- 整条流水线（OCR→合并→标题→排版→EPUB）全部成功后，再 `list` 并清理本书剩余 once。
-
-## 阶段 A：开始全量 OCR 时（必做）
-1. 确认书目录、`images/`、`total`、profile、日志路径。
-2. 启动 / 确认 OCR 后台进程。
-3. 预估完成时间；`eta` 不少于 5 分钟。
-4. 当前会话简短回报进度与 ETA。
-5. **只创建 1 个** once follow-up，时间设在预估完成时刻（可缓冲），不要一次建多个。
-
-## 阶段 B：到点检查（严格执行）
-检查提示模板：
-
-```text
-检查《书名》OCR进度。书籍目录：<BOOK_DIR>，总页数 <TOTAL>，输出在 ocr-result/，日志 <OCR_LOG>。
-
-请严格按下面做：
-1. 统计 ocr-result 中已完成页数 completed/<TOTAL>，并检查 ocr.py 进程是否仍在运行。
-2. 若 completed>=<TOTAL> 且进程已结束：明确回复“OCR已完成”，并继续执行粗合并、标题整理、排版成书、导出EPUB（参考 pdf-set skill）。完成后把 EPUB 发回用户；若 android-notification 可用则再发一条通知。然后删除本书相关、尚未执行的 once 定时任务。
-3. 若未完成：
-   - 基于最近完成页面的 mtime 估算剩余时间；
-   - 在本会话回复当前进度、速度、预计完成时间；
-   - 再创建 **1 个** once follow-up 到本会话，时间设为 **预计完成时刻**（可加约 10–15% 缓冲，或至少 5 分钟后），label 如“书名进度HH:MM”，prompt 复用本指令，实现递归检查；
-   - 不要一次创建多个检查；不要只删任务而不排下一次 ETA；
-   - 若进程已停止且未完成，分析日志错误，尝试按当前 PDF_OCR_PROFILE 断点续跑，再重新估时并安排下一次检查。
-4. 简洁回复，不要泄露任何 API key。
+```bash
+python scripts/ocr_status.py --base-dir "书籍目录" --json
 ```
 
-### B2. 若 OCR 已完成
-1. 回复：`OCR已完成`。
-2. 依次：粗合并 → 标题分类 → 排版成书 → 导出 EPUB。
-3. **必须把最终 EPUB 发回用户**。
-4. 导出前/发送前执行 `references/导出EPUB.md` 质量检查。
-5. **删除**本书相关、尚未执行的 once 进度检查；不要再创建进度检查任务。
+只有 `N.meta.json` 为 `status=ok, validated=true` 的页算完成。
 
-### B3/B4 未完成
-- 进程在跑：估速、回报、再排 **1 个** ETA once。
-- 进程已停：读日志、按当前 profile 断点续跑；额度/503/认证错误不要死循环。
-- 无论哪种：未完成就不能只清空任务；必须留下下一次预估完成检查。
+## 定时任务（强制）
+- 一次只保留 **1 个** 本书 once 检查；时间 = 当前 ETA（可加 10–15% 缓冲，不少于 5 分钟后）。
+- 禁止一次创建多个固定间隔检查。
+- 到点：
+  - 未完成：读取新状态；进程停止则先查 `*.fail.json`/日志并修复或续跑；重算 ETA，再建下一个唯一 once。
+  - OCR 完成：执行 validate → merge → heading gate → typeset → EPUB → validate_epub；全流程成功后删除本书剩余 once。
+- 未完成时不得只删检查而不创建下一次 ETA。
+- API 配额/认证/结构错误不得死循环重试；报告错误并等待处理。
 
-## 定时任务实现
-### minis
-- `minis-scheduled` once follow-up + `android-notification`
-- 创建前可 `list`；同书多条 once 时只保留最新 ETA，删掉多余堆叠（但删完后若仍未完成必须立刻再建 1 个 ETA）。
-### Linux/OpenClaw
-- `cron` `at` + `agentTurn` + `sessionTarget=current` + `deleteAfterRun=true`
+## 推荐调度 prompt
 
-## 安全与 GitHub 提交
-- secrets 只读 env 或本地 ignored 文件。
-- prompt / 回复 / 通知绝不写 API key。
-- 示例路径用占位：`/var/minis/mounts/minis/<书名>` 与 `~/books/<书名>`。
+```text
+检查《书名》PDF→EPUB 流水线。
+工作目录：<BOOK_DIR>
+状态：运行 python scripts/ocr_status.py --base-dir <BOOK_DIR> --json。
+若 remaining>0：确认 OCR 进程；如进程因可恢复原因停止则断点续跑；按 eta_local 创建唯一下一次 once。
+若 complete=true：运行 validate_ocr.py，然后 merge_rough.py；进入标题分类 gate；标题已确认后 typeset、pandoc、validate_epub.py。全部成功后回传 EPUB 并删除本书剩余 once。
+不得用文件数量冒充有效页数；不得堆叠多个检查；不得泄露密钥。
+```
+
+## 环境选择
+- minis：`minis-scheduled` once follow-up；通知可选 `android-notification`。
+- Linux/OpenClaw：使用当前环境可靠的 one-shot scheduler/cron agentTurn。
+- 调度 prompt 只写 profile 名称，不写 API key。
+
+## 生命周期
+- EPUB 生成并严格校验成功：清理未执行定时任务；保留工作目录等待用户验收。
+- 用户验收后：按 EPUB Acceptance Gate 清理中间产物。

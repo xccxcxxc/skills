@@ -30,7 +30,7 @@ table {
   max-width: 100%;
   table-layout: auto;
   margin: 0.4em 0;
-  font-size: 0.92rem; /* readable body size */
+  font-size: 0.92em; /* readable relative body size */
   line-height: 1.35;
   font-variant-numeric: tabular-nums;
 }
@@ -75,10 +75,10 @@ tr:nth-child(even) td {
 /* ---------- dense multi-header statistical tables ---------- */
 table.table-dense {
   width: auto !important;
-  min-width: max-content;
+  min-width: 100%;
   max-width: none !important;
   table-layout: auto !important;
-  font-size: 0.72rem; /* ~11.5px — readable, not microscopic */
+  font-size: 0.72em; /* relative to reader-selected body size */
   line-height: 1.2;
 }
 
@@ -100,9 +100,9 @@ table.table-dense td:first-child {
 
 @media screen and (max-width: 520px) {
   table {
-    font-size: 0.86rem;
+    font-size: 0.86em;
   }
   table.table-dense {
-    font-size: 0.64rem;
+    font-size: 0.64em;
   }
 }

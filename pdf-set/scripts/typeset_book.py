@@ -59,6 +59,7 @@ def split_by_h1(input_file, output_dir):
     if len(parts) <= 1:
         raise RuntimeError(f"No H1 headings found in {input_file}")
 
+    preamble = parts[0]
     created = []
     for index, section in enumerate(parts[1:], start=1):
         lines = section.split("\n", 1)
@@ -66,17 +67,17 @@ def split_by_h1(input_file, output_dir):
         body = lines[1] if len(lines) > 1 else ""
         filename = f"{index}.{safe_filename(title)}.md"
         path = os.path.join(output_dir, filename)
+        section_text = f"# {title}\n{body}".rstrip() + "\n"
+        if index == 1 and preamble.strip():
+            section_text = preamble.rstrip() + "\n\n" + section_text
         with open(path, "w", encoding="utf-8") as f:
-            f.write(f"# {title}\n{body}".rstrip() + "\n")
+            f.write(section_text)
         created.append(filename)
     return created
 
 
 def cleanup_text(text):
-    text = re.sub(r"([\u4e00-\u9fa5]{2,})\1+", r"\1", text)
-    text = re.sub(r"([\u4e00-\u9fa5])\1{2,}", r"\1\1", text)
-    text = re.sub(r"(\b\w+\b)\1+", r"\1", text)
-
+    """Only normalize footnote tag line breaks; never delete repeated OCR text."""
     def clean_footnote(match):
         return "".join(line.strip() for line in match.group(0).splitlines())
 
@@ -111,8 +112,9 @@ def is_html_table_markup_line(text):
         return False
     return bool(
         re.search(
-            r"</?(?:div\b|table\b|thead\b|tbody\b|tr\b|th\b|td\b)|"
-            r"class\s*=\s*[\"']table-(?:wrap|dense)",
+            r"</?(?:table\b|thead\b|tbody\b|tr\b|th\b|td\b)|"
+            r"<div\b[^>]*class\s*=\s*[\"'][^\"']*\btable-wrap\b|"
+            r"</div\s*>",
             s,
         )
     )
@@ -120,7 +122,14 @@ def is_html_table_markup_line(text):
 
 def process_layout(input_path, output_path, is_index=False):
     with open(input_path, "r", encoding="utf-8") as f:
-        lines = f.read().splitlines()
+        source = f.read()
+
+    front_matter = ""
+    match = re.match(r"\A---\s*\n.*?\n---\s*(?:\n|\Z)", source, flags=re.DOTALL)
+    if match:
+        front_matter = match.group(0).rstrip()
+        source = source[match.end():]
+    lines = source.splitlines()
 
     blocks = []
     current_block = ""
@@ -226,6 +235,8 @@ def process_layout(input_path, output_path, is_index=False):
         blocks.append(current_block.rstrip())
 
     final_text = cleanup_text("\n\n".join(blocks))
+    if front_matter:
+        final_text = front_matter + "\n\n" + final_text.lstrip()
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(final_text.rstrip() + "\n")
 
@@ -291,13 +302,15 @@ def replace_inline_tokens(text):
     return "".join(out), count
 
 
-def merge_final(input_dir, filenames, output_file):
+def merge_final(input_dir, filenames, output_file, repair_inline_tokens=False):
     merged = []
     for filename in sorted(filenames, key=natural_number):
         with open(os.path.join(input_dir, filename), "r", encoding="utf-8") as f:
             merged.append(f.read().strip())
     text = "\n\n".join(merged).rstrip() + "\n"
-    text, replaced = replace_inline_tokens(text)
+    replaced = 0
+    if repair_inline_tokens:
+        text, replaced = replace_inline_tokens(text)
 
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     with open(output_file, "w", encoding="utf-8") as f:
@@ -321,6 +334,11 @@ def main():
         action="store_true",
         help="Keep numbered split files in merge-result and typeset-result for debugging.",
     )
+    parser.add_argument(
+        "--repair-inline-tokens",
+        action="store_true",
+        help="Opt in to legacy and/or/he/of replacement between CJK characters.",
+    )
     args = parser.parse_args()
 
     base_dir = args.base_dir
@@ -335,14 +353,24 @@ def main():
         split_files = split_by_h1(input_file, split_dir)
         print(f"Sections detected: {len(split_files)}")
         typeset_files(split_dir, typeset_dir, split_files)
-        merge_final(typeset_dir, split_files, output_file)
+        merge_final(
+            typeset_dir,
+            split_files,
+            output_file,
+            repair_inline_tokens=args.repair_inline_tokens,
+        )
     else:
         with tempfile.TemporaryDirectory(prefix="pdf-set-split-") as split_dir:
             with tempfile.TemporaryDirectory(prefix="pdf-set-typeset-") as typeset_dir:
                 split_files = split_by_h1(input_file, split_dir)
                 print(f"Sections detected: {len(split_files)}")
                 typeset_files(split_dir, typeset_dir, split_files)
-                merge_final(typeset_dir, split_files, output_file)
+                merge_final(
+            typeset_dir,
+            split_files,
+            output_file,
+            repair_inline_tokens=args.repair_inline_tokens,
+        )
 
     print(f"Done. Files processed: {len(split_files)}.")
 

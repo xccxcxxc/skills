@@ -1,59 +1,96 @@
-import os, re, sys, shutil, tempfile
-from zipfile import ZipFile, ZIP_DEFLATED, ZIP_STORED
+#!/usr/bin/env python3
+"""Optionally rename Pandoc EPUB chapter files; not required for valid EPUB."""
+from __future__ import annotations
 
-src, dst = sys.argv[1], sys.argv[2]
-tmp = tempfile.mkdtemp(prefix='epub-rename-')
-with ZipFile(src) as z:
-    z.extractall(tmp)
+import argparse
+from pathlib import Path, PurePosixPath
+import os
+import re
+import shutil
+import tempfile
+from urllib.parse import unquote
+from xml.etree import ElementTree as ET
+from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
-text_dir = os.path.join(tmp, 'EPUB', 'text')
-nav_path = os.path.join(tmp, 'EPUB', 'nav.xhtml')
-ncx_path = os.path.join(tmp, 'EPUB', 'toc.ncx')
-opf_path = os.path.join(tmp, 'EPUB', 'content.opf')
-nav = open(nav_path, encoding='utf-8').read()
 
 def safe_name(title, used):
-    title = re.sub(r'<[^>]+>', '', title)
-    title = re.sub(r'[\\/:*?"<>|]', '', title).strip()
-    title = re.sub(r'\s+', ' ', title)[:48] or '章节'
-    base = title
-    n = 2
-    while title in used:
-        title = f'{base}-{n}'
+    title = re.sub(r"<[^>]+>", "", title)
+    title = re.sub(r'[\\/:*?"<>|]', "", title).strip()
+    title = re.sub(r"\s+", "-", title)[:48] or "chapter"
+    base, value, n = title, title, 2
+    while value in used:
+        value = f"{base}-{n}"
         n += 1
-    used.add(title)
-    return title + '.xhtml'
+    used.add(value)
+    return value + ".xhtml"
 
-mapping, used = {}, set()
-for old, label in re.findall(r'href="text/(ch\d+\.xhtml)#[^"]*">(.*?)</a>', nav):
-    if old not in mapping:
-        mapping[old] = safe_name(label, used)
 
-for old, new in mapping.items():
-    old_path = os.path.join(text_dir, old)
-    if os.path.exists(old_path):
-        os.rename(old_path, os.path.join(text_dir, new))
+def local(tag):
+    return tag.rsplit("}", 1)[-1]
 
-for path in (nav_path, ncx_path, opf_path):
-    if not os.path.exists(path):
-        continue
-    text = open(path, encoding='utf-8').read()
+
+def rename_epub(src, dst):
+    temp = Path(tempfile.mkdtemp(prefix="epub-rename-"))
+    try:
+        with ZipFile(src) as z:
+            z.extractall(temp)
+        container = ET.parse(temp / "META-INF" / "container.xml").getroot()
+        opf_rel = next(e.attrib["full-path"] for e in container.iter() if local(e.tag) == "rootfile")
+        opf_path = temp / PurePosixPath(opf_rel)
+        opf_root = ET.parse(opf_path).getroot()
+        opf_dir = PurePosixPath(opf_rel).parent
+        nav_rel = None
+        for item in opf_root.iter():
+            if local(item.tag) == "item" and "nav" in item.attrib.get("properties", "").split():
+                nav_rel = str(opf_dir / item.attrib["href"])
+                break
+        if not nav_rel:
+            raise RuntimeError("EPUB nav item not found")
+        nav_path = temp / PurePosixPath(nav_rel)
+        nav_text = nav_path.read_text(encoding="utf-8")
+        mapping, used = {}, set()
+        for href, label in re.findall(r'href="([^"]*ch\d+\.xhtml)(?:#[^"]*)?"[^>]*>(.*?)</a>', nav_text, re.S):
+            old_rel = unquote(str(PurePosixPath(nav_rel).parent / href))
+            if old_rel not in mapping:
+                new_name = safe_name(re.sub(r"<[^>]+>", "", label), used)
+                mapping[old_rel] = str(PurePosixPath(old_rel).with_name(new_name))
+
+        # Rename files, then update every textual EPUB document, not only nav/opf.
+        for old, new in mapping.items():
+            old_path, new_path = temp / PurePosixPath(old), temp / PurePosixPath(new)
+            if old_path.exists():
+                new_path.parent.mkdir(parents=True, exist_ok=True)
+                os.rename(old_path, new_path)
+        for path in temp.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in {".xhtml", ".html", ".opf", ".ncx", ".xml"}:
+                continue
+            text = path.read_text(encoding="utf-8")
+            rel = PurePosixPath(path.relative_to(temp).as_posix())
+            for old, new in mapping.items():
+                old_base, new_base = PurePosixPath(old).name, PurePosixPath(new).name
+                text = text.replace(old_base, new_base)
+            path.write_text(text, encoding="utf-8")
+
+        with ZipFile(dst, "w") as out:
+            mimetype = temp / "mimetype"
+            out.write(mimetype, "mimetype", compress_type=ZIP_STORED)
+            for path in sorted(temp.rglob("*")):
+                if path.is_file() and path.name != "mimetype":
+                    out.write(path, path.relative_to(temp).as_posix(), compress_type=ZIP_DEFLATED)
+        return mapping
+    finally:
+        shutil.rmtree(temp, ignore_errors=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Optionally rename EPUB chapter XHTML files.")
+    parser.add_argument("src")
+    parser.add_argument("dst")
+    args = parser.parse_args()
+    mapping = rename_epub(args.src, args.dst)
     for old, new in mapping.items():
-        text = text.replace('text/' + old, 'text/' + new)
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(text)
+        print(f"{old} -> {new}")
 
-with ZipFile(dst, 'w') as out:
-    mimetype = os.path.join(tmp, 'mimetype')
-    if os.path.exists(mimetype):
-        out.write(mimetype, 'mimetype', compress_type=ZIP_STORED)
-    for root, _, files in os.walk(tmp):
-        for fn in files:
-            path = os.path.join(root, fn)
-            rel = os.path.relpath(path, tmp).replace(os.sep, '/')
-            if rel != 'mimetype':
-                out.write(path, rel, compress_type=ZIP_DEFLATED)
 
-for old, new in mapping.items():
-    print(f'{old} -> {new}')
-shutil.rmtree(tmp)
+if __name__ == "__main__":
+    main()

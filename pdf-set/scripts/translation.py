@@ -30,11 +30,7 @@ def _extract_secret(patterns, text):
 
 
 def _load_secrets_or_exit(path):
-    content = _load_secrets_text(path)
-    if not content.strip():
-        print("请在Antigravity Tools中复制配置粘贴到secrets_openai.txt中！")
-        sys.exit(1)
-    return content
+    return _load_secrets_text(path)
 
 
 def read_single_path(path):
@@ -404,32 +400,38 @@ class DoubleProgress:
 
 openai_secrets_path = os.path.join(ASSETS_DIR, "secrets_openai.txt")
 openai_secrets_text = _load_secrets_or_exit(openai_secrets_path)
-OPENAI_BASE_URL = _extract_secret(
+OPENAI_BASE_URL = os.environ.get("PDF_TRANSLATE_BASE_URL", "").strip() or _extract_secret(
     [
         r"base_url\s*[:=]\s*['\"]([^'\"]+)['\"]",
         r"['\"]base_url['\"]\s*[:=]\s*['\"]([^'\"]+)['\"]",
     ],
     openai_secrets_text,
 )
-OPENAI_API_KEY = _extract_secret(
+OPENAI_API_KEY = os.environ.get("PDF_TRANSLATE_API_KEY", "").strip() or _extract_secret(
     [
         r"api_key\s*=\s*['\"]([^'\"]+)['\"]",
         r"api_key\s*:\s*['\"]([^'\"]+)['\"]",
     ],
     openai_secrets_text,
 )
-OPENAI_MODEL = _extract_secret(
+OPENAI_MODEL = os.environ.get("PDF_TRANSLATE_MODEL", "").strip() or _extract_secret(
     [
         r"model\s*[:=]\s*['\"]([^'\"]+)['\"]",
         r"['\"]model['\"]\s*[:=]\s*['\"]([^'\"]+)['\"]",
     ],
     openai_secrets_text,
 )
-if not OPENAI_BASE_URL or not OPENAI_API_KEY or not OPENAI_MODEL:
-    print("secrets_openai.txt missing required values: base_url, api_key, or model.")
-    sys.exit(1)
 MODEL = OPENAI_MODEL
 openai_client = None
+
+
+def _ensure_translation_config():
+    if not OPENAI_BASE_URL or not OPENAI_API_KEY or not OPENAI_MODEL:
+        raise RuntimeError(
+            "Translation credentials missing. Configure PDF_TRANSLATE_BASE_URL, "
+            "PDF_TRANSLATE_API_KEY, PDF_TRANSLATE_MODEL, or local ignored "
+            "assets/secrets_openai.txt."
+        )
 
 
 class EmptyResponseError(RuntimeError):
@@ -588,19 +590,21 @@ def _wait_with_terminal_hint(seconds, reason_text):
 
 def _request_text_once(model_name, request_text):
     global openai_client
+    _ensure_translation_config()
     if openai_client is None:
         openai_client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
     response = openai_client.chat.completions.create(
         model=model_name or OPENAI_MODEL,
         messages=[{"role": "user", "content": request_text}],
+        max_tokens=8192,
     )
     finish_reason = ""
     try:
         finish_reason = str(response.choices[0].finish_reason or "").upper()
     except Exception:
         finish_reason = ""
-    if finish_reason and "CONTENT_FILTER" in finish_reason:
-        raise RuntimeError(f"finishReason={finish_reason}")
+    if any(marker in finish_reason for marker in ("CONTENT_FILTER", "LENGTH", "MAX_TOKEN", "MAX_OUTPUT")):
+        raise FallbackSignalError(f"finishReason={finish_reason}")
     text = ""
     try:
         content = response.choices[0].message.content
@@ -615,23 +619,21 @@ def _request_text_once(model_name, request_text):
 
 def _request_text_once_openai(request_text):
     global openai_client
-    if not OPENAI_BASE_URL or not OPENAI_API_KEY or not OPENAI_MODEL:
-        raise RuntimeError(
-            "secrets_openai.txt missing required values: base_url, api_key, or model."
-        )
+    _ensure_translation_config()
     if openai_client is None:
         openai_client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
     response = openai_client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=[{"role": "user", "content": request_text}],
+        max_tokens=8192,
     )
     finish_reason = ""
     try:
         finish_reason = str(response.choices[0].finish_reason or "").upper()
     except Exception:
         finish_reason = ""
-    if finish_reason and "CONTENT_FILTER" in finish_reason:
-        raise RuntimeError(f"finishReason={finish_reason}")
+    if any(marker in finish_reason for marker in ("CONTENT_FILTER", "LENGTH", "MAX_TOKEN", "MAX_OUTPUT")):
+        raise FallbackSignalError(f"finishReason={finish_reason}")
     text = ""
     try:
         content = response.choices[0].message.content

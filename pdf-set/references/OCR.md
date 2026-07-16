@@ -74,7 +74,8 @@ python scripts/validate_ocr.py --base-dir "书籍目录" --strict-placeholders
 - 混排页可输出「正文 + 表题 + 表格 + 正文」，不要整页图片化。
 - 单层/叙述表：GFM，长文本显示可自动换行。
 - 多级/统计密表：白名单 HTML + `table-wrap` + `table-dense`，保留 rowspan/colspan。
-- 注释不塞进单元格。
+- **注释不进单元格**：表内只留①②③；注释正文在表下 `  <sup>【①……】</sup>`。
+- 后处理：`scripts/extract_table_notes.py` 自动抽出误入单元格的 `<sup>【…】</sup>`。
 - 续页重复表头供单页读取；`merge_rough.py` 会在表头 signature 完全一致时保守合并。
 
 ## 图文混排

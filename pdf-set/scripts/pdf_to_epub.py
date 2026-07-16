@@ -94,6 +94,10 @@ def main():
     run([sys.executable, HERE / "crop_figures.py", "--base-dir", work])
     mark(state_path, state, "crop-figures", "ok", figures=str(work / "figures"))
 
+    # Table cells must not contain expanded footnote bodies (① stays in cell; note after table).
+    run([sys.executable, HERE / "extract_table_notes.py", "--base-dir", work])
+    mark(state_path, state, "extract-table-notes", "ok")
+
     # Preserve an already classified rough file when resuming after the semantic gate.
     if args.headings_ready:
         if not rough.is_file():

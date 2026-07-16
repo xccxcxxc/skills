@@ -131,5 +131,36 @@ class FigureCropTests(unittest.TestCase):
             self.assertTrue(any(item.get("changed") for item in results))
 
 
+class TableNoteExtractTests(unittest.TestCase):
+    def test_extracts_sup_notes_from_gfm_cells(self):
+        extract = load("extract_table_notes")
+        src = """  表2—1　示例
+
+|  | 农民 | 干部 |
+| --- | :---: | :---: |
+| 县委领导<sup>【包括县委书记、副书记。】</sup>（8人） | 6 | 1 |
+| 人大领导<sup>【包括人大主任。】</sup>（6人） | 5 |  |
+
+  资料来源：访谈
+"""
+        out, n = extract.process_markdown(src)
+        self.assertEqual(n, 2)
+        self.assertIn("| 县委领导①（8人） | 6 | 1 |", out.replace(" |", " |"))
+        self.assertNotIn("包括县委书记、副书记", out.split("资料来源")[0].split("|")[-1] if False else "")
+        # notes moved below table
+        self.assertIn("<sup>【①包括县委书记、副书记。】</sup>", out)
+        self.assertIn("<sup>【②包括人大主任。】</sup>", out)
+        # table body no longer has long note
+        table_part = out.split("资料来源")[0]
+        self.assertNotIn("包括县委书记、副书记", table_part.split("\n\n")[1] if "\n\n" in table_part else table_part)
+        # more direct: no sup inside pipe rows
+        for line in out.splitlines():
+            if line.strip().startswith("|") and "---" not in line:
+                self.assertNotIn("<sup>【包括", line)
+                self.assertNotIn("包括县委书记", line)
+                self.assertNotIn("包括人大主任", line)
+        self.assertIn("资料来源：访谈", out)
+
+
 if __name__ == "__main__":
     unittest.main()

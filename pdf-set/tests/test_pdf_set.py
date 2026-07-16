@@ -104,5 +104,32 @@ class ContinuedTableTests(unittest.TestCase):
         self.assertEqual(report[0]["kind"], "html")
 
 
+class FigureCropTests(unittest.TestCase):
+    def test_crop_rewrites_page_placeholder(self):
+        crop = load("crop_figures")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            images = root / "images"
+            ocr = root / "ocr-result"
+            images.mkdir()
+            ocr.mkdir()
+            from PIL import Image, ImageDraw
+
+            im = Image.new("RGB", (400, 600), "white")
+            d = ImageDraw.Draw(im)
+            d.rectangle((80, 120, 320, 360), fill="black")
+            im.save(images / "7.jpg", quality=95)
+            (ocr / "7.md").write_text(
+                "  说明文字。\n\n  🀄️7.jpg\n\n  后续文字。\n",
+                encoding="utf-8",
+            )
+            results = crop.process_book(root)
+            text = (ocr / "7.md").read_text(encoding="utf-8")
+            self.assertIn("🀄️figures/7-1.jpg", text)
+            self.assertNotIn("🀄️7.jpg", text)
+            self.assertTrue((root / "figures" / "7-1.jpg").is_file())
+            self.assertTrue(any(item.get("changed") for item in results))
+
+
 if __name__ == "__main__":
     unittest.main()

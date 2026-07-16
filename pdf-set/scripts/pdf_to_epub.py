@@ -90,6 +90,10 @@ def main():
         raise RuntimeError("OCR validation failed; see pipeline-state.json")
     mark(state_path, state, "ocr", "ok", validation=result)
 
+    # Mixed text+figure pages: crop figure regions and rewrite 🀄️page.jpg → 🀄️figures/page-n.jpg
+    run([sys.executable, HERE / "crop_figures.py", "--base-dir", work])
+    mark(state_path, state, "crop-figures", "ok", figures=str(work / "figures"))
+
     # Preserve an already classified rough file when resuming after the semantic gate.
     if args.headings_ready:
         if not rough.is_file():
@@ -122,7 +126,7 @@ def main():
         "--epub-cover-image", cover,
         "--split-level=1",
         "--toc-depth=1",
-        "--resource-path", f"{work}{os.pathsep}{images}",
+        "--resource-path", f"{work}{os.pathsep}{images}{os.pathsep}{work / 'figures'}{os.pathsep}{work / 'assets'}",
         "--metadata", f"title={title}",
         "--output", epub,
     ]

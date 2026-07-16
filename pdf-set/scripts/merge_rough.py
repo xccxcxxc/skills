@@ -8,6 +8,9 @@ import json
 from pathlib import Path
 import sys
 
+import re
+import shutil
+
 from merge_tables import merge_page_sequence
 from table_utils import atomic_write_json, atomic_write_text, validate_page_markdown
 
@@ -23,6 +26,42 @@ def clean_page_content(content):
         lines.append(line)
         previous_blank = is_blank
     return "\n".join(lines).strip()
+
+
+def materialize_placeholders(text: str, work_dir: Path, images_dir: Path, assets_dir: Path) -> str:
+    """Convert 🀄️ tokens into markdown images.
+
+    Prefer cropped figures (figures/N-1.jpg). Fall back to page images only if needed.
+    """
+
+    def repl(match: re.Match) -> str:
+        token = match.group(1).strip().replace("\\", "/")
+        candidates = []
+        if token.startswith("figures/"):
+            candidates.append(work_dir / token)
+            candidates.append(work_dir / "figures" / Path(token).name)
+        candidates.append(images_dir / Path(token).name)
+        candidates.append(work_dir / token)
+        src = next((p for p in candidates if p.is_file()), None)
+        if src is None:
+            return match.group(0)
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        rel_name = (
+            f"figures/{Path(token).name}"
+            if token.startswith("figures/")
+            else Path(token).name
+        )
+        dst = assets_dir / rel_name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if (not dst.exists()) or dst.stat().st_size != src.stat().st_size:
+            shutil.copy2(src, dst)
+        return f"![](assets/{rel_name})"
+
+    return re.sub(
+        r"🀄️\s*([A-Za-z0-9._/\-\u4e00-\u9fff]+\.(?:jpg|jpeg|png|webp))",
+        repl,
+        text,
+    )
 
 
 def collect_numeric_pages(input_dir: Path):
@@ -45,8 +84,20 @@ def check_contiguous(pages):
     return errors
 
 
-def merge_ocr_results(input_dir, output_file, *, allow_missing=False, merge_tables=True):
+def merge_ocr_results(
+    input_dir,
+    output_file,
+    *,
+    work_dir=None,
+    images_dir=None,
+    assets_dir=None,
+    allow_missing=False,
+    merge_tables=True,
+):
     input_dir, output_file = Path(input_dir), Path(output_file)
+    work_dir = Path(work_dir) if work_dir else input_dir.parent
+    images_dir = Path(images_dir) if images_dir else work_dir / "images"
+    assets_dir = Path(assets_dir) if assets_dir else work_dir / "assets"
     pages = collect_numeric_pages(input_dir)
     errors = check_contiguous(pages)
     fail_files = sorted(input_dir.glob("*.fail.json")) if input_dir.is_dir() else []
@@ -68,7 +119,16 @@ def merge_ocr_results(input_dir, output_file, *, allow_missing=False, merge_tabl
     table_report = []
     if merge_tables:
         page_data, table_report = merge_page_sequence(page_data)
-    all_content = [content for _, content in page_data if content]
+    all_content = [
+        materialize_placeholders(content, work_dir, images_dir, assets_dir)
+        for _, content in page_data
+        if content
+    ]
+    leftover = sum(1 for part in all_content if "🀄️" in part)
+    if leftover:
+        errors.append(f"unresolved figure placeholders remain after materialize: {leftover}")
+        if not allow_missing:
+            raise RuntimeError("OCR merge gate failed:\n- " + "\n- ".join(errors))
     merged_content = "\n\n".join(all_content).rstrip() + "\n"
     atomic_write_text(output_file, merged_content)
     report_path = output_file.with_suffix(output_file.suffix + ".report.json")
@@ -80,6 +140,7 @@ def merge_ocr_results(input_dir, output_file, *, allow_missing=False, merge_tabl
             "last_page": int(pages[-1].stem) if pages else None,
             "warnings": errors if allow_missing else [],
             "continued_tables_merged": table_report,
+            "assets_dir": str(assets_dir),
         },
     )
     print(f"Successfully merged {len(pages)} validated pages into {output_file}")
@@ -121,6 +182,9 @@ def main():
     merge_ocr_results(
         input_dir,
         output_file,
+        work_dir=base_dir,
+        images_dir=base_dir / "images",
+        assets_dir=base_dir / "assets",
         allow_missing=args.allow_missing,
         merge_tables=not args.no_merge_continued_tables,
     )

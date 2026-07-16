@@ -4,6 +4,13 @@ sup {
   vertical-align: super;
 }
 
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 0.8em auto;
+}
+
 /*
   Two table modes:
   1) Default / GFM narrative tables (e.g. 表5—6): readable size, long text wraps.

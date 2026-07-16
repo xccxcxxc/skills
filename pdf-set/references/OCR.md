@@ -77,6 +77,16 @@ python scripts/validate_ocr.py --base-dir "书籍目录" --strict-placeholders
 - 注释不塞进单元格。
 - 续页重复表头供单页读取；`merge_rough.py` 会在表头 signature 完全一致时保守合并。
 
+## 图文混排
+- OCR：正文照常输出；图区只写 `🀄️页码.jpg`，**不要**把整页文字+图一起当图。
+- 后处理：`scripts/crop_figures.py` 裁切到 `figures/页-序号.jpg`，并把占位改成 `🀄️figures/页-序号.jpg`。
+- 合并：`merge_rough.py` 物化为 `![](assets/figures/...)`。
+- 手动：
+
+```bash
+python scripts/crop_figures.py --base-dir "书籍目录"
+```
+
 详见 `assets/ocr_prompt.md`。
 
 ## 全书任务

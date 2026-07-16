@@ -168,7 +168,9 @@ def insert_notes_after_table(text_after: str, note_block: str) -> str:
     m = re.match(r"(\n*)", text_after)
     blanks = m.group(1) if m else ""
     rest = text_after[len(blanks) :]
-    return f"\n\n{note_block}\n\n{rest.lstrip('\n')}"
+    # Python <3.12 forbids backslashes inside f-string expressions.
+    rest_stripped = rest.lstrip("\n")
+    return f"\n\n{note_block}\n\n{rest_stripped}"
 
 
 def process_markdown(text: str) -> tuple[str, int]:

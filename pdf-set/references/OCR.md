@@ -100,3 +100,6 @@ python scripts/ocr_status.py --base-dir "书籍目录" --json
 ```
 
 定时任务必须只保留一个 ETA once；未完成重算后再建下一个。
+
+## 本地 env 示例
+仓库提供 `scripts/ocr_env.example.sh` 作为双 profile 注入模板：复制后填入自己的 endpoint/key/model，`source` 后再跑 `ocr.py` / `pdf_to_epub.py`。默认可用 `PDF_OCR_PROFILE=backup`。不要把真实密钥提交进 Git。

@@ -99,8 +99,8 @@ python scripts/crop_figures.py --base-dir "书籍目录"
 python scripts/ocr_status.py --base-dir "书籍目录" --json
 ```
 
-多页 OCR 默认建 ETA 进度跟进（App 内会话，不必用户每次要求）；只保留一个 once，未完成重算后再建下一个。详见 `OCR进度检查.md`。
-仅当用户目标是 PDF→EPUB 时，OCR 完成后才继续 merge/导出；只要 OCR 则 `validate_ocr` 后停止。
+进度通知无条件：短任务当次汇报；长任务 ETA once（App 内会话）。只保留一个 once。详见 `OCR进度检查.md`。
+仅 PDF→EPUB 在 OCR 完成后继续 merge/导出；只要 OCR 则 `validate_ocr` 后停止。
 
 ## 本地 env 示例
 仓库提供 `scripts/ocr_env.example.sh` 作为双 profile 注入模板：复制后填入自己的 endpoint/key/model，`source` 后再跑 `ocr.py` / `pdf_to_epub.py`。默认可用 `PDF_OCR_PROFILE=backup`。不要把真实密钥提交进 Git。

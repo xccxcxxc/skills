@@ -70,13 +70,12 @@ python scripts/validate_epub.py "书名.epub" --strict-footnote-arrows
 
 校验 ZIP、全部 XML/XHTML、manifest/spine/nav、资源引用、封面与未解析标记。已知不通过的 EPUB 禁止交付。
 
-## 定时进度
-多页/耗时 OCR **默认**跟进（含「只要 OCR」），不必用户每次说「后台通知」：
-- 用 `ocr_status.py` 的 `eta_local`（+10–15% 缓冲，≥5 分钟后）建 **1 个** once。
-- 到点在 **App 内会话**汇报（minis：`minis-scheduled --target new`）；**默认不要**系统通知。
-- 未完成：重算 ETA 只建下一次。
-- OCR-only 完成 → `validate_ocr` 后停；PDF→EPUB 完成 → 继续合并导出。成功后删本书剩余 once。
-- 单页/极少页或用户明确不要跟进时可跳过。细则：`references/OCR进度检查.md`。
+## 进度通知（无条件）
+凡 OCR / 导出任务都必须汇报，**不得**因页少、时长短、用户没口头要求而跳过：
+- **短、当次能跑完**：结束立刻在当前会话汇报。
+- **长、仍在后台跑**：`ocr_status.py` 的 `eta_local`（+10–15% 缓冲，≥5 分钟后）建 **1 个** once；到点 **App 内会话**汇报（`minis-scheduled --target new`）；未完成只续建下一次。
+- 默认不要系统通知。OCR-only 完成 → `validate_ocr` 后停；PDF→EPUB → 继续导出。成功后删本书剩余 once。
+- 细则：`references/OCR进度检查.md`。
 
 ## EPUB Acceptance Gate
 生成并校验 EPUB 后仍需等待用户验收。验收前保留：原 PDF、images、ocr-result/meta、merge-result、标题/排版 Markdown、assets、EPUB 和状态文件；不要放在自动清理的临时目录。用户明确确认或授权清理后，才删除任务中间产物并报告清理内容。

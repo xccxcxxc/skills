@@ -24,16 +24,14 @@ description: "PDF 分图、视觉 OCR、表格/脚注处理、标题排版、翻
 3. 不静默删字、补文、改词；任何启发式修复必须显式 opt-in。
 4. 密钥只读环境变量或 ignored 本地文件，绝不写入 prompt、日志、回复或 Git。
 5. 工作目录与命令保持 minis/Linux/Windows 可替换，不把仓库绑定单机。
-6. **开始 OCR / PDF→EPUB 前先向用户显示当前 profile 与模型**（例如 `OCR 模型: backup / grok-4.5`）。默认使用 `PDF_OCR_PROFILE`（未设时用 profile 列表第一个）；可用 `--profile` 覆盖。不自动跨 profile 故障转移。
 
 ## PDF→EPUB 状态机
 
 ```bash
-# 默认读 PDF_OCR_PROFILE；也可用 --profile 覆盖
 python scripts/pdf_to_epub.py \
   --pdf "书名.pdf" \
   --work-dir "书籍目录" \
-  --profile "${PDF_OCR_PROFILE:-primary}"
+  --profile primary
 ```
 
 阶段：
@@ -73,29 +71,14 @@ python scripts/validate_epub.py "书名.epub" --strict-footnote-arrows
 校验 ZIP、全部 XML/XHTML、manifest/spine/nav、资源引用、封面与未解析标记。已知不通过的 EPUB 禁止交付。
 
 ## 定时进度
-全书 PDF→EPUB 才启用：始终只保留 **1 个 ETA once**。未完成重算并建立下一次；全流程成功后删除相关未执行 once。细则见 `references/OCR进度检查.md`。
+全书 PDF→EPUB 且需后台跟进时才启用：
+- 用 `ocr_status.py` 的 `eta_local`（+10–15% 缓冲，≥5 分钟后）建 **1 个** once。
+- 到点在 **App 内会话**汇报进度（minis：`minis-scheduled --target new`）；**默认不要**系统通知。
+- 未完成：重算 ETA 再只建下一次；完成并导出成功后删除本书剩余 once。
+- 细则与 prompt 模板：`references/OCR进度检查.md`。
 
 ## EPUB Acceptance Gate
 生成并校验 EPUB 后仍需等待用户验收。验收前保留：原 PDF、images、ocr-result/meta、merge-result、标题/排版 Markdown、assets、EPUB 和状态文件；不要放在自动清理的临时目录。用户明确确认或授权清理后，才删除任务中间产物并报告清理内容。
-
-
-## OCR Profiles（选择）
-推荐双 profile 环境变量（密钥不入库）：
-
-```text
-PDF_OCR_PROFILES=primary,backup
-PDF_OCR_PRIMARY_BASE_URL=...
-PDF_OCR_PRIMARY_API_KEY=...
-PDF_OCR_PRIMARY_MODEL=...
-PDF_OCR_BACKUP_BASE_URL=...
-PDF_OCR_BACKUP_API_KEY=...
-PDF_OCR_BACKUP_MODEL=...
-PDF_OCR_PROFILE=backup
-```
-
-- 查看：`python scripts/ocr.py --list-profiles`（不输出 key）
-- 选择：`export PDF_OCR_PROFILE=primary|backup` 或 `--profile ...`
-- 本地可自备 launcher 注入上述变量；仓库不绑定具体 endpoint/模型名。
 
 ## 开发质量
 - 依赖：`requirements.txt` + Pandoc。

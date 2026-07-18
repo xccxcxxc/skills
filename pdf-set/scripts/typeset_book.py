@@ -76,12 +76,49 @@ def split_by_h1(input_file, output_dir):
     return created
 
 
+# Printed page numbers from scan footers/headers, e.g. ·12· •6• ・64・ · 1 ·
+_PAGE_MARK_INLINE_RE = re.compile(
+    r"[·•‧・．][ \t\u3000]*[0-9０-９]{1,4}[ \t\u3000]*[·•‧・．]"
+)
+_PAGE_MARK_LINE_RE = re.compile(
+    r"^[ \t\u3000]*[·•‧・．][ \t\u3000]*[0-9０-９]{1,4}"
+    r"[ \t\u3000]*[·•‧・．][ \t\u3000]*$"
+)
+
+
+def strip_page_number_markers(text: str) -> str:
+    """Remove scan page marks like ·12· / •6•; drop marker-only lines; collapse blanks."""
+    lines = text.splitlines()
+    kept = []
+    for line in lines:
+        stripped = line.strip()
+        if _PAGE_MARK_LINE_RE.match(stripped):
+            continue
+        cleaned = _PAGE_MARK_INLINE_RE.sub("", line)
+        lead_m = re.match(r"^[ \t\u3000]*", cleaned)
+        lead = lead_m.group(0) if lead_m else ""
+        body = cleaned[len(lead) :]
+        body = re.sub(r"[ \t\u3000]{2,}", " ", body)
+        cleaned = lead + body
+        if cleaned.strip() == "":
+            if stripped == "":
+                kept.append("")
+            continue
+        kept.append(cleaned.rstrip())
+
+    text2 = "\n".join(kept)
+    text2 = re.sub(r"\n{3,}", "\n\n", text2)
+    return text2
+
+
 def cleanup_text(text):
-    """Only normalize footnote tag line breaks; never delete repeated OCR text."""
+    """Normalize footnotes; strip scan page numbers; never delete repeated OCR prose."""
     def clean_footnote(match):
         return "".join(line.strip() for line in match.group(0).splitlines())
 
-    return re.compile(r"<sup>.*?</sup>", re.DOTALL).sub(clean_footnote, text)
+    text = re.compile(r"<sup>.*?</sup>", re.DOTALL).sub(clean_footnote, text)
+    text = strip_page_number_markers(text)
+    return text
 
 
 def is_halfwidth_char(ch):
@@ -157,6 +194,23 @@ def process_layout(input_path, output_path, is_index=False):
         stripped = line.strip()
         if not stripped:
             continue
+        # Drop scan page-number lines early so they don't create empty blocks.
+        if _PAGE_MARK_LINE_RE.match(stripped):
+            continue
+        if _PAGE_MARK_INLINE_RE.fullmatch(stripped):
+            continue
+        # Strip inline page marks before layout decisions.
+        if _PAGE_MARK_INLINE_RE.search(line):
+            lead_m = re.match(r"^[ \t\u3000]*", line)
+            lead = lead_m.group(0) if lead_m else ""
+            body = _PAGE_MARK_INLINE_RE.sub("", line[len(lead) :])
+            body = re.sub(r"[ \t\u3000]{2,}", " ", body).strip()
+            if not body:
+                continue
+            line = lead + body if (lead.startswith("  ") or lead.startswith("\u3000")) else (
+                ("  " + body) if line.startswith("  ") else body
+            )
+            stripped = line.strip()
 
         starts_html = bool(re.search(r"<div\b[^>]*table-wrap|<table\b", stripped, re.I))
         if in_html_table or (not in_pipe_table and (starts_html or (is_html_table_markup_line(stripped) and "<" in stripped))):

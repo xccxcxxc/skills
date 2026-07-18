@@ -48,6 +48,23 @@ class TypesetTests(unittest.TestCase):
         value = "哈哈哈 好好好学习 测试测试测试 人人人人"
         self.assertEqual(self.ts.cleanup_text(value), value)
 
+    def test_strip_page_number_markers(self):
+        text = (
+            "  上一段结尾。\n\n"
+            "·12·\n\n"
+            "  ·3·你四十大棍，让你终身为奴。\n\n"
+            "•6•\n\n"
+            "  下一段开始。\n\n\n\n"
+            "  再下一段。\n"
+        )
+        out = self.ts.cleanup_text(text)
+        self.assertNotIn("·12·", out)
+        self.assertNotIn("·3·", out)
+        self.assertNotIn("•6•", out)
+        self.assertIn("你四十大棍，让你终身为奴。", out)
+        self.assertIn("上一段结尾。", out)
+        self.assertNotRegex(out, r"\n{3,}")
+
     def test_preamble_and_generic_div_preserved(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)

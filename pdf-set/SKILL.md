@@ -71,11 +71,12 @@ python scripts/validate_epub.py "书名.epub" --strict-footnote-arrows
 校验 ZIP、全部 XML/XHTML、manifest/spine/nav、资源引用、封面与未解析标记。已知不通过的 EPUB 禁止交付。
 
 ## 定时进度
-全书 PDF→EPUB 且需后台跟进时才启用：
+多页/耗时 OCR **默认**跟进（含「只要 OCR」），不必用户每次说「后台通知」：
 - 用 `ocr_status.py` 的 `eta_local`（+10–15% 缓冲，≥5 分钟后）建 **1 个** once。
-- 到点在 **App 内会话**汇报进度（minis：`minis-scheduled --target new`）；**默认不要**系统通知。
-- 未完成：重算 ETA 再只建下一次；完成并导出成功后删除本书剩余 once。
-- 细则与 prompt 模板：`references/OCR进度检查.md`。
+- 到点在 **App 内会话**汇报（minis：`minis-scheduled --target new`）；**默认不要**系统通知。
+- 未完成：重算 ETA 只建下一次。
+- OCR-only 完成 → `validate_ocr` 后停；PDF→EPUB 完成 → 继续合并导出。成功后删本书剩余 once。
+- 单页/极少页或用户明确不要跟进时可跳过。细则：`references/OCR进度检查.md`。
 
 ## EPUB Acceptance Gate
 生成并校验 EPUB 后仍需等待用户验收。验收前保留：原 PDF、images、ocr-result/meta、merge-result、标题/排版 Markdown、assets、EPUB 和状态文件；不要放在自动清理的临时目录。用户明确确认或授权清理后，才删除任务中间产物并报告清理内容。
